@@ -481,3 +481,267 @@ fn read_interp_curve<R: Read>(r: &mut Reader<R>) -> io::Result<InterpolationCurv
         y2: bytes[3],
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::format::reader::Reader;
+    use std::io::Cursor;
+
+    fn reader_from(data: &[u8]) -> Reader<Cursor<Vec<u8>>> {
+        Reader::new(Cursor::new(data.to_vec()))
+    }
+
+    // ────── InterpolationCurve ──────
+
+    #[test]
+    fn test_interp_curve_is_linear_true() {
+        let ic = InterpolationCurve { x1: 20, y1: 20, x2: 107, y2: 107 };
+        assert!(ic.is_linear());
+    }
+
+    #[test]
+    fn test_interp_curve_is_linear_false_x1_ne_y1() {
+        let ic = InterpolationCurve { x1: 20, y1: 30, x2: 107, y2: 107 };
+        assert!(!ic.is_linear());
+    }
+
+    #[test]
+    fn test_interp_curve_is_linear_false_x2_ne_y2() {
+        let ic = InterpolationCurve { x1: 20, y1: 20, x2: 100, y2: 107 };
+        assert!(!ic.is_linear());
+    }
+
+    // ────── read_interp_curve ──────
+
+    #[test]
+    fn test_read_interp_curve() {
+        let mut r = reader_from(&[20, 20, 107, 107]);
+        let ic = read_interp_curve(&mut r).unwrap();
+        assert_eq!(ic.x1, 20);
+        assert_eq!(ic.y1, 20);
+        assert_eq!(ic.x2, 107);
+        assert_eq!(ic.y2, 107);
+        assert!(ic.is_linear());
+    }
+
+    #[test]
+    fn test_read_interp_curve_nonlinear() {
+        let mut r = reader_from(&[10, 60, 80, 120]);
+        let ic = read_interp_curve(&mut r).unwrap();
+        assert_eq!(ic.x1, 10);
+        assert_eq!(ic.y1, 60);
+        assert!(!ic.is_linear());
+    }
+
+    // ────── read_camera_interp ──────
+
+    #[test]
+    fn test_read_camera_interp_normalization() {
+        // [0, 127, 64, 127] → ax=0/127=0.0, ay=127/127=1.0, bx=64/127, by=127/127=1.0
+        let mut r = reader_from(&[0, 127, 64, 127]);
+        let ci = read_camera_interp(&mut r).unwrap();
+        assert!((ci.ax - 0.0).abs() < 1e-6, "ax={}", ci.ax);
+        assert!((ci.ay - 1.0).abs() < 1e-6, "ay={}", ci.ay);
+        assert!((ci.bx - 64.0 / 127.0).abs() < 1e-6, "bx={}", ci.bx);
+        assert!((ci.by - 1.0).abs() < 1e-6, "by={}", ci.by);
+    }
+
+    #[test]
+    fn test_read_camera_interp_linear() {
+        // [20, 20, 107, 107] → ax=ay=20/127, bx=by=107/127 (linear)
+        let mut r = reader_from(&[20, 20, 107, 107]);
+        let ci = read_camera_interp(&mut r).unwrap();
+        assert!((ci.ax - ci.ay).abs() < 1e-9);
+        assert!((ci.bx - ci.by).abs() < 1e-9);
+    }
+
+    // ────── read_bone_frame_initial ──────
+
+    fn make_bone_frame_bytes(frame: i32, phys_disabled: bool) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&frame.to_le_bytes()); // frame_num
+        data.extend_from_slice(&0i32.to_le_bytes());  // prev_id
+        data.extend_from_slice(&0i32.to_le_bytes());  // next_id
+        // 4 interp curves (all linear: x1=20, y1=20, x2=107, y2=107)
+        for _ in 0..4 {
+            data.extend_from_slice(&[20, 20, 107, 107]);
+        }
+        // movement = (0, 0, 0)
+        for _ in 0..3 { data.extend_from_slice(&0.0f32.to_le_bytes()); }
+        // rotation = (0, 0, 0, 1) = identity quaternion
+        for _ in 0..3 { data.extend_from_slice(&0.0f32.to_le_bytes()); }
+        data.extend_from_slice(&1.0f32.to_le_bytes()); // w=1
+        data.push(0); // is_selected = false
+        data.push(if phys_disabled { 1 } else { 0 }); // physic_disabled
+        data
+    }
+
+    #[test]
+    fn test_read_bone_frame_initial_identity() {
+        let data = make_bone_frame_bytes(5, false);
+        let mut r = reader_from(&data);
+        let (frame, prev_id, next_id) = read_bone_frame_initial(&mut r).unwrap();
+        assert_eq!(frame.frame, 5);
+        assert_eq!(prev_id, 0);
+        assert_eq!(next_id, 0);
+        assert!(frame.interp_x.is_linear());
+        assert!(frame.interp_y.is_linear());
+        assert!(frame.movement.length() < 1e-6);
+        assert!(frame.physics_enabled);
+    }
+
+    #[test]
+    fn test_read_bone_frame_physics_enabled() {
+        let data = make_bone_frame_bytes(0, false);
+        let mut r = reader_from(&data);
+        let (frame, _, _) = read_bone_frame_initial(&mut r).unwrap();
+        assert!(frame.physics_enabled);
+    }
+
+    #[test]
+    fn test_read_bone_frame_physics_disabled() {
+        let data = make_bone_frame_bytes(0, true);
+        let mut r = reader_from(&data);
+        let (frame, _, _) = read_bone_frame_initial(&mut r).unwrap();
+        assert!(!frame.physics_enabled);
+    }
+
+    // ────── read_morph_frame_initial ──────
+
+    #[test]
+    fn test_read_morph_frame_initial() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&3i32.to_le_bytes()); // frame_num = 3
+        data.extend_from_slice(&1i32.to_le_bytes()); // prev_id = 1
+        data.extend_from_slice(&2i32.to_le_bytes()); // next_id = 2
+        data.extend_from_slice(&0.5f32.to_le_bytes()); // weight = 0.5
+        data.push(0); // is_selected = false
+        let mut r = reader_from(&data);
+        let (frame_num, prev, next) = read_morph_frame_initial(&mut r).unwrap();
+        assert_eq!(frame_num, 3);
+        assert_eq!(prev, 1);
+        assert_eq!(next, 2);
+    }
+
+    // ────── read_camera_frame テストヘルパー ──────
+
+    fn make_camera_frame_bytes(
+        frame: i32,
+        fov: i32,
+        follow_model: i32,
+        follow_bone: i32,
+        has_data_index: bool,
+    ) -> Vec<u8> {
+        let mut data = Vec::new();
+        if has_data_index { data.extend_from_slice(&0i32.to_le_bytes()); }
+        data.extend_from_slice(&frame.to_le_bytes());       // frame
+        data.extend_from_slice(&0i32.to_le_bytes());        // before_index
+        data.extend_from_slice(&0i32.to_le_bytes());        // after_index
+        data.extend_from_slice(&(-45.0f32).to_le_bytes());  // distance
+        for _ in 0..3 { data.extend_from_slice(&0.0f32.to_le_bytes()); } // position
+        for _ in 0..3 { data.extend_from_slice(&0.0f32.to_le_bytes()); } // rotation
+        data.extend_from_slice(&follow_model.to_le_bytes());
+        data.extend_from_slice(&follow_bone.to_le_bytes());
+        // 6 camera interp (linear: [20, 20, 107, 107] × 6)
+        for _ in 0..6 { data.extend_from_slice(&[20, 20, 107, 107]); }
+        data.push(0); // is_orth = false
+        data.extend_from_slice(&fov.to_le_bytes()); // fov_deg as i32
+        data.push(0); // selected
+        data
+    }
+
+    // ────── read_camera_frame ──────
+
+    #[test]
+    fn test_read_camera_frame_no_data_index() {
+        let data = make_camera_frame_bytes(5, 30, -1, -1, false);
+        let mut r = reader_from(&data);
+        let cf = read_camera_frame(&mut r, false).unwrap();
+        assert_eq!(cf.frame, 5);
+        assert!((cf.distance - (-45.0)).abs() < 1e-6, "distance={}", cf.distance);
+        assert!((cf.fov_deg - 30.0).abs() < 1e-6, "fov={}", cf.fov_deg);
+        assert_eq!(cf.follow_model, -1);
+        assert_eq!(cf.follow_bone, -1);
+        assert!(!cf.is_orth);
+    }
+
+    #[test]
+    fn test_read_camera_frame_with_data_index() {
+        let data = make_camera_frame_bytes(10, 60, 1, 2, true);
+        let mut r = reader_from(&data);
+        let cf = read_camera_frame(&mut r, true).unwrap();
+        assert_eq!(cf.frame, 10);
+        assert!((cf.fov_deg - 60.0).abs() < 1e-6, "fov={}", cf.fov_deg);
+        assert_eq!(cf.follow_model, 1);
+        assert_eq!(cf.follow_bone, 2);
+    }
+
+    #[test]
+    fn test_read_camera_frame_interp_linear() {
+        // interp [20,20,107,107] → ax=ay, bx=by (linear)
+        let data = make_camera_frame_bytes(0, 30, -1, -1, false);
+        let mut r = reader_from(&data);
+        let cf = read_camera_frame(&mut r, false).unwrap();
+        assert!((cf.interp_x.ax - cf.interp_x.ay).abs() < 1e-9);
+        assert!((cf.interp_x.bx - cf.interp_x.by).abs() < 1e-9);
+    }
+
+    // ────── read_config_frame テストヘルパー ──────
+
+    fn make_config_frame_bytes(
+        frame: i32,
+        ik_states: &[bool],
+        extern_parents: &[(i32, i32)],
+        is_initial: bool,
+    ) -> Vec<u8> {
+        let mut data = Vec::new();
+        if !is_initial { data.extend_from_slice(&0i32.to_le_bytes()); } // frame_index
+        data.extend_from_slice(&frame.to_le_bytes());  // frame_num
+        data.extend_from_slice(&0i32.to_le_bytes());   // prev_id
+        data.extend_from_slice(&0i32.to_le_bytes());   // next_id
+        data.push(1); // visible = true
+        for &ik in ik_states { data.push(if ik { 1 } else { 0 }); }
+        for &(mi, bi) in extern_parents {
+            data.extend_from_slice(&mi.to_le_bytes());
+            data.extend_from_slice(&bi.to_le_bytes());
+        }
+        data.push(0); // is_selected
+        data
+    }
+
+    // ────── read_config_frame ──────
+
+    #[test]
+    fn test_read_config_frame_initial() {
+        let data = make_config_frame_bytes(0, &[true, false], &[(-1, -1)], true);
+        let mut r = reader_from(&data);
+        let cf = read_config_frame(&mut r, 2, 1, true).unwrap();
+        assert_eq!(cf.frame, 0);
+        assert_eq!(cf.ik_enabled, vec![true, false]);
+        assert_eq!(cf.extern_parents.len(), 1);
+        assert_eq!(cf.extern_parents[0].model_index, -1);
+        assert_eq!(cf.extern_parents[0].bone_index, -1);
+    }
+
+    #[test]
+    fn test_read_config_frame_non_initial() {
+        let data = make_config_frame_bytes(15, &[false], &[], false);
+        let mut r = reader_from(&data);
+        let cf = read_config_frame(&mut r, 1, 0, false).unwrap();
+        assert_eq!(cf.frame, 15);
+        assert_eq!(cf.ik_enabled, vec![false]);
+        assert!(cf.extern_parents.is_empty());
+    }
+
+    #[test]
+    fn test_read_config_frame_multiple_extern_parents() {
+        let data = make_config_frame_bytes(5, &[true], &[(2, 3), (-1, -1)], true);
+        let mut r = reader_from(&data);
+        let cf = read_config_frame(&mut r, 1, 2, true).unwrap();
+        assert_eq!(cf.extern_parents.len(), 2);
+        assert_eq!(cf.extern_parents[0].model_index, 2);
+        assert_eq!(cf.extern_parents[0].bone_index, 3);
+        assert_eq!(cf.extern_parents[1].model_index, -1);
+    }
+}

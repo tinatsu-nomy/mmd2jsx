@@ -109,3 +109,99 @@ pub(crate) fn emit_jsx(content: String, path: Option<&Path>) -> io::Result<()> {
 pub fn output_jsx(all_frames: &[Vec<FrameData>], config: &JsxConfig, path: Option<&Path>) -> io::Result<()> {
     emit_jsx(generate_jsx(all_frames, config), path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_config(
+        width: i32, height: i32, fps: u32, scale: f64,
+        bone_names: Vec<String>, comp_name: &str,
+    ) -> JsxConfig {
+        JsxConfig {
+            width, height, aspect: 1.0, fps, scale,
+            comp_name: comp_name.to_string(),
+            bone_names,
+        }
+    }
+
+    fn single_frame(x: f32, y: f32, z: f32) -> Vec<Vec<FrameData>> {
+        vec![vec![FrameData { frame: 0, world_x: x, world_y: y, world_z: z }]]
+    }
+
+    #[test]
+    fn test_generate_jsx_contains_header() {
+        let config = make_config(1920, 1080, 30, 20.0, vec!["Bone".to_string()], "Comp");
+        let jsx = generate_jsx(&single_frame(0.0, 0.0, 0.0), &config);
+        assert!(jsx.contains("MikuMikuDance To After Effects (Bone)"));
+    }
+
+    #[test]
+    fn test_generate_jsx_dimensions() {
+        let config = make_config(1920, 1080, 30, 20.0, vec!["Bone".to_string()], "Comp");
+        let jsx = generate_jsx(&single_frame(0.0, 0.0, 0.0), &config);
+        assert!(jsx.contains("var Width       = 1920;"));
+        assert!(jsx.contains("var Height      = 1080;"));
+        assert!(jsx.contains("var FPS         = 30;"));
+    }
+
+    #[test]
+    fn test_generate_jsx_comp_name() {
+        let config = make_config(1920, 1080, 30, 20.0, vec!["Bone".to_string()], "TestComp");
+        let jsx = generate_jsx(&single_frame(0.0, 0.0, 0.0), &config);
+        assert!(jsx.contains("\"TestComp\""));
+    }
+
+    #[test]
+    fn test_generate_jsx_bone_name_in_layer() {
+        let config = make_config(1920, 1080, 30, 20.0, vec!["RightArm".to_string()], "Comp");
+        let jsx = generate_jsx(&single_frame(0.0, 0.0, 0.0), &config);
+        assert!(jsx.contains("\"RightArm\""));
+    }
+
+    #[test]
+    fn test_generate_jsx_coordinate_transform() {
+        // x=1, y=2, z=3, scale=20, 1920x1080
+        // AE X = 1*20 + 960 = 980
+        // AE Y = -2*20 + 540 = 500
+        // AE Z = 3*20 = 60
+        let config = make_config(1920, 1080, 30, 20.0, vec!["Bone".to_string()], "Comp");
+        let jsx = generate_jsx(&single_frame(1.0, 2.0, 3.0), &config);
+        assert!(jsx.contains("980.000000"), "AE X not found in JSX:\n{}", jsx);
+        assert!(jsx.contains("500.000000"), "AE Y not found in JSX:\n{}", jsx);
+        assert!(jsx.contains("60.000000"),  "AE Z not found in JSX:\n{}", jsx);
+    }
+
+    #[test]
+    fn test_generate_jsx_time_calculation() {
+        // frame=30, fps=30 → time = 1.000000
+        let config = make_config(1920, 1080, 30, 20.0, vec!["Bone".to_string()], "Comp");
+        let frames = vec![vec![FrameData { frame: 30, world_x: 0.0, world_y: 0.0, world_z: 0.0 }]];
+        let jsx = generate_jsx(&frames, &config);
+        assert!(jsx.contains("1.000000"), "time not found in JSX");
+    }
+
+    #[test]
+    fn test_generate_jsx_duration() {
+        // max_frame=60, fps=30 → duration = 60/30 + 1/30 = 2.033333...
+        let config = make_config(1920, 1080, 30, 20.0, vec!["Bone".to_string()], "Comp");
+        let frames = vec![vec![FrameData { frame: 60, world_x: 0.0, world_y: 0.0, world_z: 0.0 }]];
+        let jsx = generate_jsx(&frames, &config);
+        assert!(jsx.contains("2.033333"), "duration not found in JSX:\n{}", jsx);
+    }
+
+    #[test]
+    fn test_generate_jsx_multi_bone() {
+        let config = make_config(
+            1920, 1080, 30, 20.0,
+            vec!["Bone0".to_string(), "Bone1".to_string()], "Comp",
+        );
+        let frames = vec![
+            vec![FrameData { frame: 0, world_x: 0.0, world_y: 0.0, world_z: 0.0 }],
+            vec![FrameData { frame: 0, world_x: 0.0, world_y: 0.0, world_z: 0.0 }],
+        ];
+        let jsx = generate_jsx(&frames, &config);
+        assert!(jsx.contains("layNull[0]"));
+        assert!(jsx.contains("layNull[1]"));
+    }
+}

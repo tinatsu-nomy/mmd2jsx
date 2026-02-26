@@ -335,6 +335,262 @@ fn apply_ik_angle_limit(q: Quat, link: &pmx::IkLink) -> Quat {
 // IK 後のワールド行列再計算
 // ─────────────────────────────────────────────
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::format::pmx::{IkInfo, IkLink, PmxBone};
+    use glam::{Mat4, Quat, Vec3};
+    use std::collections::HashMap;
+
+    fn make_pmx_bone(name: &str, pos: [f32; 3], parent: i32) -> PmxBone {
+        PmxBone {
+            name: name.to_string(),
+            position: Vec3::from_array(pos),
+            parent_index: parent,
+            transform_order: 0,
+            ik: None,
+            add_bone_index: None,
+            add_ratio: 0.0,
+            is_local_add: false,
+            is_add_rotation: false,
+            is_add_translation: false,
+        }
+    }
+
+    // ────── compute_world_transforms ──────
+
+    #[test]
+    fn test_compute_empty() {
+        let result = compute_world_transforms(&[], &[], &[], &[], &[], &HashMap::new());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_single_bone_no_movement() {
+        // pos=(0,9,0), 移動なし → world=(0,9,0)
+        let bones = [make_pmx_bone("root", [0.0, 9.0, 0.0], -1)];
+        let movements = [Vec3::ZERO];
+        let rotations = [Quat::IDENTITY];
+        let result = compute_world_transforms(&bones, &movements, &rotations, &[], &[], &HashMap::new());
+        assert_eq!(result.len(), 1);
+        let (pos, _) = result[0];
+        assert!((pos.y - 9.0).abs() < 1e-5, "expected y=9.0, got {}", pos.y);
+    }
+
+    #[test]
+    fn test_single_bone_with_movement() {
+        // pos=(0,0,0), movement=(0,5,0) → world=(0,5,0)
+        let bones = [make_pmx_bone("root", [0.0, 0.0, 0.0], -1)];
+        let movements = [Vec3::new(0.0, 5.0, 0.0)];
+        let rotations = [Quat::IDENTITY];
+        let result = compute_world_transforms(&bones, &movements, &rotations, &[], &[], &HashMap::new());
+        let (pos, _) = result[0];
+        assert!((pos.y - 5.0).abs() < 1e-5, "expected y=5.0, got {}", pos.y);
+    }
+
+    #[test]
+    fn test_parent_child_fk_propagation() {
+        // bone0: pos=(0,0,0), movement=(0,5,0)
+        // bone1: pos=(0,10,0), parent=0, movement=0
+        // expected bone1 world: (0,15,0)
+        let bones = [
+            make_pmx_bone("parent", [0.0, 0.0, 0.0], -1),
+            make_pmx_bone("child",  [0.0, 10.0, 0.0], 0),
+        ];
+        let movements = [Vec3::new(0.0, 5.0, 0.0), Vec3::ZERO];
+        let rotations = [Quat::IDENTITY, Quat::IDENTITY];
+        let result = compute_world_transforms(&bones, &movements, &rotations, &[], &[], &HashMap::new());
+        let (child_pos, _) = result[1];
+        assert!((child_pos.y - 15.0).abs() < 1e-4, "expected y=15.0, got {}", child_pos.y);
+    }
+
+    #[test]
+    fn test_fk_rotation_propagation() {
+        // bone0: pos=(0,0,0), Y軸90°回転
+        // bone1: pos=(5,0,0), parent=0 → 回転後 world ≈ (0,0,-5)
+        let bones = [
+            make_pmx_bone("parent", [0.0, 0.0, 0.0], -1),
+            make_pmx_bone("child",  [5.0, 0.0, 0.0], 0),
+        ];
+        let movements = [Vec3::ZERO, Vec3::ZERO];
+        let rotations = [
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            Quat::IDENTITY,
+        ];
+        let result = compute_world_transforms(&bones, &movements, &rotations, &[], &[], &HashMap::new());
+        let (child_pos, _) = result[1];
+        assert!(child_pos.x.abs() < 1e-4, "expected x≈0, got {}", child_pos.x);
+        assert!(child_pos.y.abs() < 1e-4, "expected y≈0, got {}", child_pos.y);
+        assert!((child_pos.z - (-5.0)).abs() < 1e-4, "expected z≈-5, got {}", child_pos.z);
+    }
+
+    #[test]
+    fn test_ik_disabled_no_effect() {
+        // IKボーンを定義するが ik_enabled=false → FK位置のまま
+        let mut ik_bone = make_pmx_bone("IK", [0.0, 2.0, 0.0], -1);
+        ik_bone.ik = Some(IkInfo {
+            target_bone_index: 1,
+            loop_count: 10,
+            limit_angle: 1.0,
+            links: vec![IkLink { bone_index: 0, angle_min: None, angle_max: None }],
+        });
+        let bones = [
+            make_pmx_bone("chain",  [0.0, 1.0, 0.0], -1),
+            make_pmx_bone("target", [0.0, 1.0, 0.0], 0),
+            ik_bone,
+        ];
+        let movements = [Vec3::ZERO; 3];
+        let rotations = [Quat::IDENTITY; 3];
+        let ik_enabled = [false];
+        let ik_bone_indices = [2i32];
+
+        let result_disabled = compute_world_transforms(
+            &bones, &movements, &rotations, &ik_enabled, &ik_bone_indices, &HashMap::new(),
+        );
+        let result_no_ik = compute_world_transforms(
+            &bones, &movements, &rotations, &[], &[], &HashMap::new(),
+        );
+
+        // IK無効時とIK設定なし時で同じ結果になるはず
+        for i in 0..3 {
+            let (p1, _) = result_disabled[i];
+            let (p2, _) = result_no_ik[i];
+            assert!((p1 - p2).length() < 1e-5, "bone {} differs: {:?} vs {:?}", i, p1, p2);
+        }
+    }
+
+    #[test]
+    fn test_extern_parent_mat_applied() {
+        // 外部親 Y=10 の行列 → bone0 world Y ≈ 10
+        let bones = [make_pmx_bone("root", [0.0, 0.0, 0.0], -1)];
+        let movements = [Vec3::ZERO];
+        let rotations = [Quat::IDENTITY];
+        let mut extern_parents = HashMap::new();
+        extern_parents.insert(0usize, Mat4::from_translation(Vec3::new(0.0, 10.0, 0.0)));
+
+        let result = compute_world_transforms(
+            &bones, &movements, &rotations, &[], &[], &extern_parents,
+        );
+        let (pos, _) = result[0];
+        assert!((pos.y - 10.0).abs() < 1e-5, "expected y=10.0, got {}", pos.y);
+    }
+
+    // ────── clamp_quat_angle ──────
+
+    #[test]
+    fn test_clamp_quat_angle_zero_max() {
+        let q = Quat::from_rotation_y(1.0);
+        let result = clamp_quat_angle(q, 0.0);
+        // max=0 → returns IDENTITY
+        assert!((result.w - 1.0).abs() < 1e-5, "expected identity (w≈1), got w={}", result.w);
+    }
+
+    #[test]
+    fn test_clamp_quat_angle_within_limit() {
+        let q = Quat::from_rotation_y(0.3);
+        let result = clamp_quat_angle(q, 1.0);
+        // 0.3 < 1.0 → no clamping
+        let (_, angle_q) = q.to_axis_angle();
+        let (_, angle_r) = result.to_axis_angle();
+        assert!((angle_q - angle_r).abs() < 1e-5);
+    }
+
+    // ────── apply_ik_angle_limit ──────
+
+    #[test]
+    fn test_apply_ik_angle_limit_clamp() {
+        // 各軸1.0rad の回転 → limit=0.1rad でクランプ
+        use glam::EulerRot;
+        let q = Quat::from_euler(EulerRot::XYZ, 1.0, 0.5, -0.8);
+        let link = IkLink {
+            bone_index: 0,
+            angle_min: Some([-0.1, -0.1, -0.1]),
+            angle_max: Some([0.1, 0.1, 0.1]),
+        };
+        let result = apply_ik_angle_limit(q, &link);
+        let (x, y, z) = result.to_euler(EulerRot::XYZ);
+        assert!(x.abs() <= 0.1 + 1e-5, "x={} exceeds limit", x);
+        assert!(y.abs() <= 0.1 + 1e-5, "y={} exceeds limit", y);
+        assert!(z.abs() <= 0.1 + 1e-5, "z={} exceeds limit", z);
+    }
+
+    // ────── apply_grant（回転付与・移動付与）──────
+
+    #[test]
+    fn test_grant_rotation() {
+        // bone0: source (Y軸90°回転)
+        // bone1: grant bone (is_add_rotation=true, add_bone=0, ratio=0.5)
+        // 期待: bone1 の回転 ≈ Y45°
+        let mut grant_bone = make_pmx_bone("grant", [0.0, 0.0, 0.0], -1);
+        grant_bone.is_add_rotation = true;
+        grant_bone.add_bone_index = Some(0);
+        grant_bone.add_ratio = 0.5;
+        let bones = [
+            make_pmx_bone("source", [0.0, 0.0, 0.0], -1),
+            grant_bone,
+        ];
+        let movements = [Vec3::ZERO, Vec3::ZERO];
+        let rotations = [Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Quat::IDENTITY];
+        let result = compute_world_transforms(&bones, &movements, &rotations, &[], &[], &HashMap::new());
+        let (_, grant_rot) = result[1];
+        let expected = Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
+        assert!(grant_rot.dot(expected).abs() > 0.999, "expected Y45°, got {:?}", grant_rot);
+    }
+
+    #[test]
+    fn test_grant_translation() {
+        // bone0: source (Y=4.0 移動)
+        // bone1: grant bone (is_add_translation=true, add_bone=0, ratio=0.5)
+        // 期待: bone1 world Y = 4.0 * 0.5 = 2.0
+        let mut grant_bone = make_pmx_bone("grant", [0.0, 0.0, 0.0], -1);
+        grant_bone.is_add_translation = true;
+        grant_bone.add_bone_index = Some(0);
+        grant_bone.add_ratio = 0.5;
+        let bones = [make_pmx_bone("source", [0.0, 0.0, 0.0], -1), grant_bone];
+        let movements = [Vec3::new(0.0, 4.0, 0.0), Vec3::ZERO];
+        let rotations = [Quat::IDENTITY, Quat::IDENTITY];
+        let result = compute_world_transforms(&bones, &movements, &rotations, &[], &[], &HashMap::new());
+        let (grant_pos, _) = result[1];
+        assert!((grant_pos.y - 2.0).abs() < 1e-5, "expected y=2.0, got {}", grant_pos.y);
+    }
+
+    // ────── solve_ccd_ik（IK有効パス）──────
+
+    #[test]
+    fn test_ik_enabled_moves_effector_toward_goal() {
+        // IK: chain[0] (root) + effector[1] + IK bone[2] (goal at (1,0,0))
+        // FK 状態: effector は (0,1,0), goal は (1,0,0)
+        // IK有効 → effector が (1,0,0) に近づく
+        let mut ik_bone = make_pmx_bone("IK", [1.0, 0.0, 0.0], -1);
+        ik_bone.ik = Some(IkInfo {
+            target_bone_index: 1,
+            loop_count: 20,
+            limit_angle: 2.0,
+            links: vec![IkLink { bone_index: 0, angle_min: None, angle_max: None }],
+        });
+        let bones = [
+            make_pmx_bone("chain",    [0.0, 0.0, 0.0], -1),
+            make_pmx_bone("effector", [0.0, 1.0, 0.0], 0),
+            ik_bone,
+        ];
+        let movements = [Vec3::ZERO; 3];
+        let rotations = [Quat::IDENTITY; 3];
+        let result_ik = compute_world_transforms(
+            &bones, &movements, &rotations, &[true], &[2i32], &HashMap::new(),
+        );
+        let result_fk = compute_world_transforms(
+            &bones, &movements, &rotations, &[], &[], &HashMap::new(),
+        );
+        let goal = Vec3::new(1.0, 0.0, 0.0);
+        let (ik_pos, _) = result_ik[1];
+        let (fk_pos, _) = result_fk[1];
+        assert!(
+            (ik_pos - goal).length() < (fk_pos - goal).length(),
+            "IK pos={:?} should be closer to goal than FK pos={:?}", ik_pos, fk_pos
+        );
+    }
+}
+
 fn recompute_world_mats_from(
     bones: &[pmx::PmxBone],
     world_mats: &mut Vec<Mat4>,

@@ -463,3 +463,403 @@ fn build_frames_no_fk(target_bone: &PmmBone, all_frames: bool) -> Vec<FrameData>
 // dead_code 警告が出るため suppress する
 #[allow(dead_code)]
 fn _use_config_frame(_: &ConfigFrame) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::format::pmm::{ExternParentEntry, InterpolationCurve, PmmBone, PmmModel, PmmData};
+
+    // ────── テストヘルパー ──────
+
+    fn linear_ic() -> InterpolationCurve {
+        InterpolationCurve { x1: 20, y1: 20, x2: 107, y2: 107 }
+    }
+
+    fn nonlinear_ic() -> InterpolationCurve {
+        InterpolationCurve { x1: 20, y1: 80, x2: 107, y2: 107 }
+    }
+
+    fn make_bone_frame_at(frame: i32, x: f32, y: f32, z: f32) -> BoneFrame {
+        BoneFrame {
+            frame,
+            interp_x: linear_ic(),
+            interp_y: linear_ic(),
+            interp_z: linear_ic(),
+            interp_rot: linear_ic(),
+            movement: Vec3::new(x, y, z),
+            rotation: Quat::IDENTITY,
+            physics_enabled: true,
+        }
+    }
+
+    fn make_pmm_bone(name: &str, frames: Vec<BoneFrame>) -> PmmBone {
+        PmmBone { name: name.to_string(), frames }
+    }
+
+    fn make_pmm_model(bones: Vec<PmmBone>) -> PmmModel {
+        PmmModel {
+            name: "TestModel".to_string(),
+            model_id: 0,
+            render_order: 0,
+            path: "".to_string(),
+            bones,
+            ik_bone_indices: vec![],
+            initial_ik_state: vec![],
+            config_frames: vec![],
+            parentable_bone_indices: vec![],
+            initial_extern_parents: vec![],
+        }
+    }
+
+    fn make_pmm_data(models: Vec<PmmModel>) -> PmmData {
+        PmmData {
+            output_width: 1920,
+            output_height: 1080,
+            models,
+            cameras: vec![],
+        }
+    }
+
+    // ────── lerp ──────
+
+    #[test]
+    fn test_lerp_endpoints_and_midpoint() {
+        assert!((lerp(0.0, 10.0, 0.0) - 0.0).abs() < 1e-6);
+        assert!((lerp(0.0, 10.0, 1.0) - 10.0).abs() < 1e-6);
+        assert!((lerp(0.0, 10.0, 0.5) - 5.0).abs() < 1e-6);
+    }
+
+    // ────── interp_value ──────
+
+    #[test]
+    fn test_interp_value_linear() {
+        let ic = linear_ic();
+        let result = interp_value(0.0, 10.0, 0.5, &ic);
+        assert!((result - 5.0).abs() < 1e-5, "expected 5.0, got {}", result);
+    }
+
+    #[test]
+    fn test_interp_value_nonlinear() {
+        let ic = nonlinear_ic(); // x1=20, y1=80 → not linear
+        let linear_mid = lerp(0.0, 10.0, 0.5);
+        let nonlinear_mid = interp_value(0.0, 10.0, 0.5, &ic);
+        assert!(
+            (linear_mid - nonlinear_mid).abs() > 1.0,
+            "linear={}, nonlinear={}", linear_mid, nonlinear_mid
+        );
+    }
+
+    // ────── frames_approx_equal ──────
+
+    #[test]
+    fn test_frames_approx_equal_same() {
+        assert!(frames_approx_equal((1.0, 2.0, 3.0), (1.0, 2.0, 3.0)));
+    }
+
+    #[test]
+    fn test_frames_approx_equal_diff() {
+        assert!(!frames_approx_equal((1.0, 2.0, 3.0), (1.01, 2.0, 3.0)));
+    }
+
+    #[test]
+    fn test_frames_approx_equal_epsilon() {
+        // 差 5e-7 < EPS(1e-6) → true
+        assert!(frames_approx_equal((1.0, 2.0, 3.0), (1.0 + 5e-7, 2.0, 3.0)));
+    }
+
+    // ────── needs_bezier ──────
+
+    #[test]
+    fn test_needs_bezier_linear() {
+        let fa = make_bone_frame_at(0, 0.0, 0.0, 0.0);
+        let fb = make_bone_frame_at(10, 1.0, 0.0, 0.0);
+        assert!(!needs_bezier(&fa, &fb));
+    }
+
+    #[test]
+    fn test_needs_bezier_nonlinear_x() {
+        let fa = make_bone_frame_at(0, 0.0, 0.0, 0.0);
+        let mut fb = make_bone_frame_at(10, 1.0, 0.0, 0.0);
+        fb.interp_x = nonlinear_ic();
+        assert!(needs_bezier(&fa, &fb));
+    }
+
+    // ────── interp_bone_at_frame ──────
+
+    #[test]
+    fn test_interp_bone_empty() {
+        let bone = make_pmm_bone("empty", vec![]);
+        let (mov, rot) = interp_bone_at_frame(&bone, 5);
+        assert_eq!(mov, Vec3::ZERO);
+        assert_eq!(rot, Quat::IDENTITY);
+    }
+
+    #[test]
+    fn test_interp_bone_before_start() {
+        let bone = make_pmm_bone("b", vec![make_bone_frame_at(10, 1.0, 0.0, 0.0)]);
+        let (mov, _) = interp_bone_at_frame(&bone, 0);
+        assert!((mov.x - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_interp_bone_after_end() {
+        let bone = make_pmm_bone("b", vec![make_bone_frame_at(10, 5.0, 0.0, 0.0)]);
+        let (mov, _) = interp_bone_at_frame(&bone, 100);
+        assert!((mov.x - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_interp_bone_midpoint_linear() {
+        let bone = make_pmm_bone("b", vec![
+            make_bone_frame_at(0, 0.0, 0.0, 0.0),
+            make_bone_frame_at(10, 10.0, 0.0, 0.0),
+        ]);
+        let (mov, _) = interp_bone_at_frame(&bone, 5);
+        assert!((mov.x - 5.0).abs() < 1e-5, "expected 5.0, got {}", mov.x);
+    }
+
+    // ────── get_ik_enabled_at ──────
+
+    #[test]
+    fn test_get_ik_enabled_no_config() {
+        let model = PmmModel {
+            initial_ik_state: vec![true, false],
+            config_frames: vec![],
+            ..make_pmm_model(vec![])
+        };
+        let result = get_ik_enabled_at(&model, 100);
+        assert_eq!(result, vec![true, false]);
+    }
+
+    #[test]
+    fn test_get_ik_enabled_latest_before_frame() {
+        let model = PmmModel {
+            initial_ik_state: vec![true, true],
+            config_frames: vec![
+                ConfigFrame { frame: 10, ik_enabled: vec![false, true], extern_parents: vec![] },
+                ConfigFrame { frame: 20, ik_enabled: vec![false, false], extern_parents: vec![] },
+            ],
+            ..make_pmm_model(vec![])
+        };
+        // frame 15 → latest config before 15 is frame 10
+        let r = get_ik_enabled_at(&model, 15);
+        assert_eq!(r, vec![false, true]);
+        // frame 5 → no config before 5 → initial
+        let r2 = get_ik_enabled_at(&model, 5);
+        assert_eq!(r2, vec![true, true]);
+    }
+
+    // ────── get_extern_parents_at ──────
+
+    #[test]
+    fn test_get_extern_parents_at_initial() {
+        let ep = ExternParentEntry { model_index: -1, bone_index: -1 };
+        let model = PmmModel {
+            initial_extern_parents: vec![ep.clone()],
+            config_frames: vec![],
+            ..make_pmm_model(vec![])
+        };
+        let result = get_extern_parents_at(&model, 0);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].model_index, -1);
+    }
+
+    // ────── build_frames (no FK) ──────
+
+    #[test]
+    fn test_build_frames_no_fk_linear_keyframes() {
+        let bone = make_pmm_bone("Center", vec![
+            make_bone_frame_at(0, 0.0, 0.0, 0.0),
+            make_bone_frame_at(10, 10.0, 0.0, 0.0),
+        ]);
+        let model = make_pmm_model(vec![bone]);
+        let pmm_data = make_pmm_data(vec![model]);
+
+        let result = build_frames(&pmm_data, 0, &[None], 0, 30, false);
+        assert_eq!(result.len(), 2, "expected 2 keyframes");
+        assert_eq!(result[0].frame, 0);
+        assert_eq!(result[1].frame, 10);
+        assert!((result[1].world_x - 10.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_build_frames_no_fk_all_frames() {
+        let bone = make_pmm_bone("Center", vec![
+            make_bone_frame_at(0, 0.0, 0.0, 0.0),
+            make_bone_frame_at(10, 10.0, 0.0, 0.0),
+        ]);
+        let model = make_pmm_model(vec![bone]);
+        let pmm_data = make_pmm_data(vec![model]);
+
+        let result = build_frames(&pmm_data, 0, &[None], 0, 30, true);
+        // 全フレームモード: frames 0..=10 で全て異なる値 → 11要素
+        assert_eq!(result.len(), 11, "expected 11 frames");
+        assert_eq!(result[0].frame, 0);
+        assert_eq!(result[10].frame, 10);
+    }
+
+    #[test]
+    fn test_build_frames_no_fk_value_skip() {
+        // 値が変化しないフレームはスキップされる
+        let bone = make_pmm_bone("Static", vec![
+            make_bone_frame_at(0, 0.0, 0.0, 0.0),
+            make_bone_frame_at(10, 0.0, 0.0, 0.0), // 同じ値
+        ]);
+        let model = make_pmm_model(vec![bone]);
+        let pmm_data = make_pmm_data(vec![model]);
+
+        let result = build_frames(&pmm_data, 0, &[None], 0, 30, true);
+        // 全フレーム(0-10)が全て(0,0,0) → スキップされて1要素のみ
+        assert_eq!(result.len(), 1, "expected 1 frame (rest skipped), got {}", result.len());
+    }
+
+    #[test]
+    fn test_build_frames_empty_bone() {
+        let bone = make_pmm_bone("Empty", vec![]);
+        let model = make_pmm_model(vec![bone]);
+        let pmm_data = make_pmm_data(vec![model]);
+
+        let result = build_frames(&pmm_data, 0, &[None], 0, 30, false);
+        assert!(result.is_empty());
+    }
+
+    // ────── build_frames (with PMX/FK) ──────
+
+    #[test]
+    fn test_build_frames_with_fk_parent_child() {
+        // PMX: parent(0,0,0) → child(0,10,0)
+        // PMM: parent に Y=5 移動, child に 0 移動
+        // child world Y = 5 + 10 = 15
+        let pmx_bones = vec![
+            PmxBone {
+                name: "parent".to_string(),
+                position: Vec3::new(0.0, 0.0, 0.0),
+                parent_index: -1,
+                transform_order: 0,
+                ik: None, add_bone_index: None, add_ratio: 0.0,
+                is_local_add: false, is_add_rotation: false, is_add_translation: false,
+            },
+            PmxBone {
+                name: "child".to_string(),
+                position: Vec3::new(0.0, 10.0, 0.0),
+                parent_index: 0,
+                transform_order: 0,
+                ik: None, add_bone_index: None, add_ratio: 0.0,
+                is_local_add: false, is_add_rotation: false, is_add_translation: false,
+            },
+        ];
+        let parent_bone = make_pmm_bone("parent", vec![make_bone_frame_at(0, 0.0, 5.0, 0.0)]);
+        let child_bone  = make_pmm_bone("child",  vec![make_bone_frame_at(0, 0.0, 0.0, 0.0)]);
+        let model = make_pmm_model(vec![parent_bone, child_bone]);
+        let pmm_data = make_pmm_data(vec![model]);
+        // target_bone_idx=1 は PMM の child ボーン
+        let result = build_frames(&pmm_data, 0, &[Some(pmx_bones)], 1, 30, false);
+        assert_eq!(result.len(), 1);
+        assert!((result[0].world_y - 15.0).abs() < 1e-4, "expected y=15.0, got {}", result[0].world_y);
+    }
+
+    #[test]
+    fn test_build_frames_with_fk_all_frames() {
+        // PMX FK パス + all_frames=true
+        let pmx_bones = vec![
+            PmxBone {
+                name: "Center".to_string(),
+                position: Vec3::ZERO,
+                parent_index: -1,
+                transform_order: 0,
+                ik: None, add_bone_index: None, add_ratio: 0.0,
+                is_local_add: false, is_add_rotation: false, is_add_translation: false,
+            },
+        ];
+        let bone = make_pmm_bone("Center", vec![
+            make_bone_frame_at(0, 0.0, 0.0, 0.0),
+            make_bone_frame_at(5, 5.0, 0.0, 0.0),
+        ]);
+        let model = make_pmm_model(vec![bone]);
+        let pmm_data = make_pmm_data(vec![model]);
+        let result = build_frames(&pmm_data, 0, &[Some(pmx_bones)], 0, 30, true);
+        // フレーム 0..=5 で全て異なる値 → 6フレーム
+        assert_eq!(result.len(), 6, "expected 6 frames, got {}", result.len());
+    }
+
+    // ────── compute_model_world_transforms_at ──────
+
+    #[test]
+    fn test_compute_model_world_transforms_at_single_bone() {
+        let pmx_bones = vec![
+            PmxBone {
+                name: "Center".to_string(),
+                position: Vec3::ZERO,
+                parent_index: -1,
+                transform_order: 0,
+                ik: None, add_bone_index: None, add_ratio: 0.0,
+                is_local_add: false, is_add_rotation: false, is_add_translation: false,
+            },
+        ];
+        let bone = make_pmm_bone("Center", vec![make_bone_frame_at(0, 1.0, 2.0, 3.0)]);
+        let model = make_pmm_model(vec![bone]);
+        let pmm_data = make_pmm_data(vec![model]);
+        let result = compute_model_world_transforms_at(&pmm_data, 0, &[Some(pmx_bones)], 0);
+        assert!(result.is_some());
+        let transforms = result.unwrap();
+        assert_eq!(transforms.len(), 1);
+        let (pos, _) = transforms[0];
+        assert!((pos.x - 1.0).abs() < 1e-5);
+        assert!((pos.y - 2.0).abs() < 1e-5);
+        assert!((pos.z - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_compute_model_world_transforms_at_no_pmx() {
+        // PMXなし → None を返す
+        let bone = make_pmm_bone("Center", vec![make_bone_frame_at(0, 1.0, 0.0, 0.0)]);
+        let model = make_pmm_model(vec![bone]);
+        let pmm_data = make_pmm_data(vec![model]);
+        let result = compute_model_world_transforms_at(&pmm_data, 0, &[None], 0);
+        assert!(result.is_none());
+    }
+
+    // ────── get_bone_world_pos_at ──────
+
+    #[test]
+    fn test_get_bone_world_pos_at() {
+        let pmx_bones = vec![
+            PmxBone {
+                name: "Center".to_string(),
+                position: Vec3::ZERO,
+                parent_index: -1,
+                transform_order: 0,
+                ik: None, add_bone_index: None, add_ratio: 0.0,
+                is_local_add: false, is_add_rotation: false, is_add_translation: false,
+            },
+        ];
+        let bone = make_pmm_bone("Center", vec![make_bone_frame_at(0, 5.0, 3.0, 0.0)]);
+        let model = make_pmm_model(vec![bone]);
+        let pmm_data = make_pmm_data(vec![model]);
+        let pos = get_bone_world_pos_at(&pmm_data, 0, &[Some(pmx_bones)], 0, 0);
+        assert!(pos.is_some());
+        let p = pos.unwrap();
+        assert!((p.x - 5.0).abs() < 1e-5, "expected x=5.0, got {}", p.x);
+        assert!((p.y - 3.0).abs() < 1e-5, "expected y=3.0, got {}", p.y);
+    }
+
+    #[test]
+    fn test_get_bone_world_pos_at_out_of_range() {
+        let pmx_bones = vec![
+            PmxBone {
+                name: "Center".to_string(),
+                position: Vec3::ZERO,
+                parent_index: -1,
+                transform_order: 0,
+                ik: None, add_bone_index: None, add_ratio: 0.0,
+                is_local_add: false, is_add_rotation: false, is_add_translation: false,
+            },
+        ];
+        let bone = make_pmm_bone("Center", vec![make_bone_frame_at(0, 0.0, 0.0, 0.0)]);
+        let model = make_pmm_model(vec![bone]);
+        let pmm_data = make_pmm_data(vec![model]);
+        // bone_pmx_idx=99 は範囲外 → None
+        let pos = get_bone_world_pos_at(&pmm_data, 0, &[Some(pmx_bones)], 99, 0);
+        assert!(pos.is_none());
+    }
+}

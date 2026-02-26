@@ -49,3 +49,77 @@ impl BezierCurve {
         3.0 * mt * mt * t * self.ay + 3.0 * mt * t * t * self.by + t * t * t
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_linear_true() {
+        let b = BezierCurve::new(0.5, 0.5, 0.7, 0.7);
+        assert!(b.is_linear());
+    }
+
+    #[test]
+    fn test_is_linear_false_ax_ne_ay() {
+        let b = BezierCurve::new(0.3, 0.5, 0.7, 0.7);
+        assert!(!b.is_linear());
+    }
+
+    #[test]
+    fn test_is_linear_false_bx_ne_by() {
+        let b = BezierCurve::new(0.5, 0.5, 0.6, 0.8);
+        assert!(!b.is_linear());
+    }
+
+    #[test]
+    fn test_evaluate_endpoints() {
+        let b = BezierCurve::new(0.3, 0.5, 0.7, 0.8);
+        assert!((b.evaluate(0.0) - 0.0).abs() < 1e-5, "evaluate(0) != 0");
+        assert!((b.evaluate(1.0) - 1.0).abs() < 1e-5, "evaluate(1) != 1");
+    }
+
+    #[test]
+    fn test_evaluate_linear_identity() {
+        // 線形ベジェ (ax==ay, bx==by) では evaluate(t) ≈ t
+        let b = BezierCurve::new(0.25, 0.25, 0.75, 0.75);
+        for i in 0..=10 {
+            let t = i as f64 / 10.0;
+            assert!(
+                (b.evaluate(t) - t).abs() < 1e-4,
+                "t={}: evaluate={:.6} expected={:.6}", t, b.evaluate(t), t
+            );
+        }
+    }
+
+    #[test]
+    fn test_evaluate_nonlinear_easing() {
+        // ax=0.1, ay=0.9 → fast-start (curve above diagonal at midpoint)
+        let b = BezierCurve::new(0.1, 0.9, 0.1, 0.9);
+        assert!(!b.is_linear());
+        let mid = b.evaluate(0.5);
+        assert!(mid > 0.5, "Expected fast-start mid > 0.5, got {}", mid);
+    }
+
+    #[test]
+    fn test_evaluate_mmd_default_interp() {
+        // MMD デフォルト補間: 20/127 と 107/127 → is_linear (20/127 == 20/127, 107/127 == 107/127)
+        let ax = 20.0 / 127.0;
+        let bx = 107.0 / 127.0;
+        let b = BezierCurve::new(ax, ax, bx, bx);
+        assert!(b.is_linear());
+    }
+
+    #[test]
+    fn test_evaluate_monotone() {
+        // 任意の曲線で evaluate は単調増加
+        let b = BezierCurve::new(0.2, 0.8, 0.8, 0.2);
+        let mut prev = -1.0_f64;
+        for i in 0..=20 {
+            let t = i as f64 / 20.0;
+            let y = b.evaluate(t);
+            assert!(y >= prev - 1e-6, "not monotone: t={}, y={}, prev={}", t, y, prev);
+            prev = y;
+        }
+    }
+}

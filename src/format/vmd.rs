@@ -102,3 +102,115 @@ fn read_bytes24<R: Read>(r: &mut Reader<R>) -> io::Result<[u8; 24]> {
     arr.copy_from_slice(&bytes);
     Ok(arr)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::format::reader::Reader;
+    use encoding_rs::SHIFT_JIS;
+    use std::io::Cursor;
+
+    /// 最小カメラVMDバイト列を構築するヘルパー
+    fn make_camera_vmd(frames: &[(u32, f32, [f32; 3])]) -> Vec<u8> {
+        let mut data = Vec::new();
+
+        // ヘッダ: 30バイト
+        let mut header = b"Vocaloid Motion Data 0002".to_vec();
+        header.resize(30, 0);
+        data.extend_from_slice(&header);
+
+        // モデル名: 20バイト ("カメラ・照明" in SJIS)
+        let (sjis, _, _) = SHIFT_JIS.encode("カメラ・照明");
+        let mut model_name = sjis.to_vec();
+        model_name.resize(20, 0);
+        data.extend_from_slice(&model_name);
+
+        // motion_count = 0, skin_count = 0
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+
+        // camera_count
+        data.extend_from_slice(&(frames.len() as u32).to_le_bytes());
+
+        // カメラフレーム: frame_no(4) + length(4) + location(12) + rotation(12) + interp(24) + viewing_angle(4) + perspective(1) = 61バイト
+        for &(frame_no, length, loc) in frames {
+            data.extend_from_slice(&frame_no.to_le_bytes());
+            data.extend_from_slice(&length.to_le_bytes());
+            for v in &loc { data.extend_from_slice(&v.to_le_bytes()); }
+            // rotation (0, 0, 0)
+            for _ in 0..3 { data.extend_from_slice(&0.0f32.to_le_bytes()); }
+            // interpolation (24 bytes, linear MMD default)
+            data.extend_from_slice(&[20, 107, 20, 107, 20, 107, 20, 107,
+                                      20, 107, 20, 107, 20, 107, 20, 107,
+                                      20, 107, 20, 107, 20, 107, 20, 107]);
+            // viewing_angle = 30
+            data.extend_from_slice(&30u32.to_le_bytes());
+            // perspective = 0
+            data.push(0);
+        }
+        data
+    }
+
+    fn make_reader(data: &[u8]) -> Reader<Cursor<Vec<u8>>> {
+        Reader::new(Cursor::new(data.to_vec()))
+    }
+
+    #[test]
+    fn test_read_vmd_invalid_header() {
+        let mut data = vec![0u8; 50];
+        data[..4].copy_from_slice(b"XVMD");
+        let mut r = make_reader(&data);
+        assert!(read_vmd_from(&mut r).is_err());
+    }
+
+    #[test]
+    fn test_read_vmd_non_camera_model() {
+        let mut data = Vec::new();
+        let mut header = b"Vocaloid Motion Data 0002".to_vec();
+        header.resize(30, 0);
+        data.extend_from_slice(&header);
+        // モデル名: "初音ミク" (not camera)
+        let (sjis, _, _) = SHIFT_JIS.encode("初音ミク");
+        let mut model_name = sjis.to_vec();
+        model_name.resize(20, 0);
+        data.extend_from_slice(&model_name);
+        // motion_count, skin_count, camera_count
+        for _ in 0..3 { data.extend_from_slice(&0u32.to_le_bytes()); }
+        let mut r = make_reader(&data);
+        assert!(read_vmd_from(&mut r).is_err());
+    }
+
+    #[test]
+    fn test_read_vmd_single_frame() {
+        let data = make_camera_vmd(&[(0, -45.0, [0.0, 10.0, 0.0])]);
+        let mut r = make_reader(&data);
+        let vmd = read_vmd_from(&mut r).unwrap();
+        assert_eq!(vmd.cameras.len(), 1);
+        assert_eq!(vmd.cameras[0].frame_no, 0);
+        assert!((vmd.cameras[0].length - (-45.0)).abs() < 1e-5);
+        assert!((vmd.cameras[0].location[1] - 10.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_read_vmd_zero_cameras_error() {
+        let data = make_camera_vmd(&[]);
+        let mut r = make_reader(&data);
+        assert!(read_vmd_from(&mut r).is_err());
+    }
+
+    #[test]
+    fn test_read_vmd_frames_sorted() {
+        // フレーム順: 10, 0, 5 → ソート後: 0, 5, 10
+        let data = make_camera_vmd(&[
+            (10, 0.0, [0.0; 3]),
+            (0,  0.0, [0.0; 3]),
+            (5,  0.0, [0.0; 3]),
+        ]);
+        let mut r = make_reader(&data);
+        let vmd = read_vmd_from(&mut r).unwrap();
+        assert_eq!(vmd.cameras.len(), 3);
+        assert_eq!(vmd.cameras[0].frame_no, 0);
+        assert_eq!(vmd.cameras[1].frame_no, 5);
+        assert_eq!(vmd.cameras[2].frame_no, 10);
+    }
+}

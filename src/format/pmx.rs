@@ -230,6 +230,322 @@ fn skip_materials<R: Read>(r: &mut Reader<R>, s: &PmxSettings, enc: u8) -> io::R
 // ボーン読み込み
 // ─────────────────────────────────────────────
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::format::reader::Reader;
+    use std::io::Cursor;
+
+    fn reader_from(data: &[u8]) -> Reader<Cursor<Vec<u8>>> {
+        Reader::new(Cursor::new(data.to_vec()))
+    }
+
+    // ────── read_index_signed ──────
+
+    #[test]
+    fn test_read_index_signed_i8() {
+        let mut r = reader_from(&[0xFE]);
+        assert_eq!(read_index_signed(&mut r, 1).unwrap(), -2i32);
+    }
+
+    #[test]
+    fn test_read_index_signed_i16() {
+        let mut r = reader_from(&[5, 0]);
+        assert_eq!(read_index_signed(&mut r, 2).unwrap(), 5i32);
+    }
+
+    #[test]
+    fn test_read_index_signed_i32() {
+        let bytes = (-1i32).to_le_bytes();
+        let mut r = reader_from(&bytes);
+        assert_eq!(read_index_signed(&mut r, 4).unwrap(), -1i32);
+    }
+
+    #[test]
+    fn test_read_index_signed_invalid_size() {
+        let mut r = reader_from(&[1, 2, 3]);
+        assert!(read_index_signed(&mut r, 3).is_err());
+    }
+
+    // ────── read_pmx_string ──────
+
+    #[test]
+    fn test_read_pmx_string_utf8() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&4i32.to_le_bytes()); // byte length = 4
+        data.extend_from_slice(b"bone");
+        let mut r = reader_from(&data);
+        assert_eq!(read_pmx_string(&mut r, 1).unwrap(), "bone");
+    }
+
+    #[test]
+    fn test_read_pmx_string_utf16le() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&4i32.to_le_bytes()); // byte length = 4
+        // "AB" in UTF-16LE
+        data.extend_from_slice(&[0x41, 0x00, 0x42, 0x00]);
+        let mut r = reader_from(&data);
+        assert_eq!(read_pmx_string(&mut r, 0).unwrap(), "AB");
+    }
+
+    #[test]
+    fn test_read_pmx_string_empty() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&0i32.to_le_bytes()); // byte length = 0
+        let mut r = reader_from(&data);
+        assert_eq!(read_pmx_string(&mut r, 1).unwrap(), "");
+    }
+
+    // ────── skip_vertices ──────
+
+    fn default_settings() -> PmxSettings {
+        PmxSettings {
+            encoding: 1, num_additional_uv: 0,
+            size_vertex_index: 1, size_texture_index: 1,
+            size_material_index: 1, size_bone_index: 1,
+            size_morph_index: 1, size_body_index: 1,
+        }
+    }
+
+    #[test]
+    fn test_skip_vertices_zero() {
+        let data = 0i32.to_le_bytes();
+        let mut r = reader_from(&data);
+        assert!(skip_vertices(&mut r, &default_settings()).is_ok());
+    }
+
+    #[test]
+    fn test_skip_vertices_bdef1() {
+        // count=1, weight_type=0 (BDEF1)
+        let mut data = Vec::new();
+        data.extend_from_slice(&1i32.to_le_bytes()); // count=1
+        data.extend_from_slice(&[0u8; 12]); // position
+        data.extend_from_slice(&[0u8; 12]); // normal
+        data.extend_from_slice(&[0u8; 8]);  // UV
+        // no additional UV
+        data.push(0); // weight_type = BDEF1(0)
+        data.push(0); // bone_index (size_bone_index=1)
+        data.extend_from_slice(&[0u8; 4]); // EdgeScale
+        let mut r = reader_from(&data);
+        assert!(skip_vertices(&mut r, &default_settings()).is_ok());
+    }
+
+    #[test]
+    fn test_skip_vertices_bdef2() {
+        // count=1, weight_type=1 (BDEF2)
+        let mut data = Vec::new();
+        data.extend_from_slice(&1i32.to_le_bytes()); // count=1
+        data.extend_from_slice(&[0u8; 32]); // pos(12)+normal(12)+UV(8)
+        data.push(1); // weight_type = BDEF2(1)
+        data.extend_from_slice(&[0u8; 2]); // bone_index × 2 (size=1)
+        data.extend_from_slice(&[0u8; 4]); // weight f32
+        data.extend_from_slice(&[0u8; 4]); // EdgeScale
+        let mut r = reader_from(&data);
+        assert!(skip_vertices(&mut r, &default_settings()).is_ok());
+    }
+
+    #[test]
+    fn test_skip_vertices_bdef4() {
+        // count=1, weight_type=2 (BDEF4)
+        let mut data = Vec::new();
+        data.extend_from_slice(&1i32.to_le_bytes()); // count=1
+        data.extend_from_slice(&[0u8; 32]); // pos+normal+UV
+        data.push(2); // weight_type = BDEF4(2)
+        data.extend_from_slice(&[0u8; 4]); // bone_index × 4 (size=1)
+        data.extend_from_slice(&[0u8; 16]); // weights 4×f32
+        data.extend_from_slice(&[0u8; 4]); // EdgeScale
+        let mut r = reader_from(&data);
+        assert!(skip_vertices(&mut r, &default_settings()).is_ok());
+    }
+
+    #[test]
+    fn test_skip_vertices_sdef() {
+        // count=1, weight_type=3 (SDEF)
+        let mut data = Vec::new();
+        data.extend_from_slice(&1i32.to_le_bytes());
+        data.extend_from_slice(&[0u8; 32]); // pos+normal+UV
+        data.push(3); // weight_type = SDEF(3)
+        data.extend_from_slice(&[0u8; 2]); // bone_index × 2
+        data.extend_from_slice(&[0u8; 4]); // weight f32
+        data.extend_from_slice(&[0u8; 36]); // C,R0,R1 (3×Vec3 = 36 bytes)
+        data.extend_from_slice(&[0u8; 4]); // EdgeScale
+        let mut r = reader_from(&data);
+        assert!(skip_vertices(&mut r, &default_settings()).is_ok());
+    }
+
+    #[test]
+    fn test_skip_vertices_qdef() {
+        // count=1, weight_type=4 (QDEF)
+        let mut data = Vec::new();
+        data.extend_from_slice(&1i32.to_le_bytes());
+        data.extend_from_slice(&[0u8; 32]); // pos+normal+UV
+        data.push(4); // weight_type = QDEF(4)
+        data.extend_from_slice(&[0u8; 4]); // bone_index × 4 (size=1)
+        data.extend_from_slice(&[0u8; 16]); // weights 4×f32
+        data.extend_from_slice(&[0u8; 4]); // EdgeScale
+        let mut r = reader_from(&data);
+        assert!(skip_vertices(&mut r, &default_settings()).is_ok());
+    }
+
+    // ────── skip_faces ──────
+
+    #[test]
+    fn test_skip_faces_zero() {
+        let data = 0i32.to_le_bytes();
+        let mut r = reader_from(&data);
+        assert!(skip_faces(&mut r, &default_settings()).is_ok());
+    }
+
+    #[test]
+    fn test_skip_faces_three_u16_indices() {
+        // vertex_count=3, size_vertex_index=2 → 3×2=6 bytes
+        let mut data = Vec::new();
+        data.extend_from_slice(&3i32.to_le_bytes());
+        data.extend_from_slice(&[0u8; 6]);
+        let s = PmxSettings { size_vertex_index: 2, ..default_settings() };
+        let mut r = reader_from(&data);
+        assert!(skip_faces(&mut r, &s).is_ok());
+    }
+
+    // ────── skip_textures ──────
+
+    #[test]
+    fn test_skip_textures_zero() {
+        let data = 0i32.to_le_bytes();
+        let mut r = reader_from(&data);
+        assert!(skip_textures(&mut r, 1).is_ok());
+    }
+
+    #[test]
+    fn test_skip_textures_one_utf8() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1i32.to_le_bytes()); // count=1
+        data.extend_from_slice(&3i32.to_le_bytes()); // length=3
+        data.extend_from_slice(b"tex");
+        let mut r = reader_from(&data);
+        assert!(skip_textures(&mut r, 1).is_ok());
+    }
+
+    // ────── read_bones ──────
+
+    #[test]
+    fn test_read_bones_zero() {
+        let data = 0i32.to_le_bytes();
+        let mut r = reader_from(&data);
+        let bones = read_bones(&mut r, &default_settings(), 1).unwrap();
+        assert!(bones.is_empty());
+    }
+
+    #[test]
+    fn test_read_bones_one_simple() {
+        // 最小ボーン: name="B", name_en="", pos=(1,2,3),
+        // parent=-1, transform_order=0, flags=0x0000 (offset connection)
+        let s = default_settings(); // size_bone_index=1
+        let mut data = Vec::new();
+        data.extend_from_slice(&1i32.to_le_bytes()); // bone count=1
+        // name "B" (UTF-8)
+        data.extend_from_slice(&1i32.to_le_bytes());
+        data.push(b'B');
+        // name_en ""
+        data.extend_from_slice(&0i32.to_le_bytes());
+        // position (1.0, 2.0, 3.0)
+        data.extend_from_slice(&1.0f32.to_le_bytes());
+        data.extend_from_slice(&2.0f32.to_le_bytes());
+        data.extend_from_slice(&3.0f32.to_le_bytes());
+        // parent_index = -1 (i8)
+        data.push(0xFF_u8);
+        // transform_order = 0
+        data.extend_from_slice(&0i32.to_le_bytes());
+        // flags = 0x0000 (bit0=0: offset connection, no optional features)
+        data.extend_from_slice(&0u16.to_le_bytes());
+        // offset Vec3 (bit0=0)
+        data.extend_from_slice(&[0u8; 12]);
+        let mut r = reader_from(&data);
+        let bones = read_bones(&mut r, &s, 1).unwrap();
+        assert_eq!(bones.len(), 1);
+        assert_eq!(bones[0].name, "B");
+        assert!((bones[0].position.x - 1.0).abs() < 1e-6);
+        assert!((bones[0].position.y - 2.0).abs() < 1e-6);
+        assert!((bones[0].position.z - 3.0).abs() < 1e-6);
+        assert_eq!(bones[0].parent_index, -1);
+        assert!(bones[0].ik.is_none());
+        assert!(!bones[0].is_add_rotation);
+        assert!(!bones[0].is_add_translation);
+    }
+
+    #[test]
+    fn test_read_bones_with_ik() {
+        // flags: bit0=1 (bone connection), bit5=1 (IK)
+        // flags = 0x0021
+        let s = default_settings();
+        let mut data = Vec::new();
+        data.extend_from_slice(&1i32.to_le_bytes()); // count=1
+        // name "IK" (UTF-8)
+        data.extend_from_slice(&2i32.to_le_bytes());
+        data.extend_from_slice(b"IK");
+        // name_en ""
+        data.extend_from_slice(&0i32.to_le_bytes());
+        // position (0,0,0)
+        data.extend_from_slice(&[0u8; 12]);
+        // parent=-1
+        data.push(0xFF_u8);
+        // transform_order=0
+        data.extend_from_slice(&0i32.to_le_bytes());
+        // flags = 0x0021 (bit0=1: bone connection, bit5=1: IK)
+        data.extend_from_slice(&0x0021u16.to_le_bytes());
+        // target bone index (bit0=1 → bone index, size=1)
+        data.push(1u8); // target = bone 1
+        // IK: target_bone_index(1), loop_count(4), limit_angle(4), link_num(4), links
+        data.push(0u8); // target_bone_index as i8
+        data.extend_from_slice(&10i32.to_le_bytes()); // loop_count=10
+        data.extend_from_slice(&1.0f32.to_le_bytes()); // limit_angle
+        data.extend_from_slice(&1i32.to_le_bytes()); // link_num=1
+        // link: bone_index(1), enable_limit(1)
+        data.push(0u8); // link bone=0
+        data.push(0u8); // enable_limit=false
+        let mut r = reader_from(&data);
+        let bones = read_bones(&mut r, &s, 1).unwrap();
+        assert_eq!(bones.len(), 1);
+        assert!(bones[0].ik.is_some());
+        let ik = bones[0].ik.as_ref().unwrap();
+        assert_eq!(ik.loop_count, 10);
+        assert_eq!(ik.links.len(), 1);
+        assert!(ik.links[0].angle_min.is_none());
+    }
+
+    #[test]
+    fn test_read_bones_with_grant_rotation() {
+        // flags: bit0=0 (offset), bit8=1 (回転付与) = 0x0100
+        let s = default_settings();
+        let mut data = Vec::new();
+        data.extend_from_slice(&1i32.to_le_bytes()); // count=1
+        // name "G"
+        data.extend_from_slice(&1i32.to_le_bytes());
+        data.push(b'G');
+        // name_en ""
+        data.extend_from_slice(&0i32.to_le_bytes());
+        // position
+        data.extend_from_slice(&[0u8; 12]);
+        // parent=-1
+        data.push(0xFF_u8);
+        // transform_order
+        data.extend_from_slice(&0i32.to_le_bytes());
+        // flags = 0x0100 (bit8: 回転付与)
+        data.extend_from_slice(&0x0100u16.to_le_bytes());
+        // offset Vec3 (bit0=0)
+        data.extend_from_slice(&[0u8; 12]);
+        // add_bone_index (i8=0) + add_ratio (f32=0.5)
+        data.push(0u8);
+        data.extend_from_slice(&0.5f32.to_le_bytes());
+        let mut r = reader_from(&data);
+        let bones = read_bones(&mut r, &s, 1).unwrap();
+        assert!(bones[0].is_add_rotation);
+        assert!(!bones[0].is_add_translation);
+        assert_eq!(bones[0].add_bone_index, Some(0));
+        assert!((bones[0].add_ratio - 0.5).abs() < 1e-6);
+    }
+}
+
 fn read_bones<R: Read>(r: &mut Reader<R>, s: &PmxSettings, enc: u8) -> io::Result<Vec<PmxBone>> {
     let count = r.read_i32()? as usize;
     let mut bones = Vec::with_capacity(count);

@@ -598,6 +598,382 @@ pub fn output_jsx_from_vmd(
     emit_jsx(generate_jsx(&convert_cameras(&raws, config.width, config.height), config), path)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ────── テストヘルパー ──────
+
+    fn linear_bezier() -> BezierCurve {
+        let v = 20.0 / 127.0;
+        let b = 107.0 / 127.0;
+        BezierCurve::new(v, v, b, b)
+    }
+
+    fn make_camera_raw(
+        frame: u32,
+        pos: [f64; 3],
+        rot: [f64; 3],
+        dist: f64,
+        fov: f64,
+    ) -> CameraRaw {
+        let lin = linear_bezier();
+        CameraRaw {
+            frame,
+            position: pos,
+            rotation: rot,
+            distance: dist,
+            fov_deg: fov,
+            interp: CameraInterpolation {
+                x_move: lin, y_move: lin, z_move: lin,
+                rotation: lin, distance: lin, fov: lin,
+            },
+        }
+    }
+
+    // ────── lerp ──────
+
+    #[test]
+    fn test_lerp_endpoints_and_midpoint() {
+        assert!((lerp(0.0, 10.0, 0.0) - 0.0).abs() < 1e-10);
+        assert!((lerp(0.0, 10.0, 1.0) - 10.0).abs() < 1e-10);
+        assert!((lerp(0.0, 10.0, 0.5) - 5.0).abs() < 1e-10);
+    }
+
+    // ────── fov_to_zoom ──────
+
+    #[test]
+    fn test_fov_to_zoom_90deg() {
+        // fov=90, zoom_constant=540 → 540 / tan(45°) = 540 / 1.0 = 540
+        let zoom = fov_to_zoom(90.0, 540.0);
+        assert!((zoom - 540.0).abs() < 0.01, "expected 540.0, got {}", zoom);
+    }
+
+    #[test]
+    fn test_fov_to_zoom_small_larger_zoom() {
+        let zoom30 = fov_to_zoom(30.0, 540.0);
+        let zoom60 = fov_to_zoom(60.0, 540.0);
+        assert!(zoom30 > zoom60, "smaller FOV should give larger zoom");
+    }
+
+    // ────── same_6dp ──────
+
+    #[test]
+    fn test_same_6dp_equal() {
+        assert!(same_6dp(1.234567, 1.234567));
+    }
+
+    #[test]
+    fn test_same_6dp_within_precision() {
+        // 7桁目以降の差 → 同一とみなす (どちらも × 1_000_000 で同じ整数に丸まる)
+        assert!(same_6dp(1.234567123, 1.234567456));
+    }
+
+    #[test]
+    fn test_same_6dp_different() {
+        assert!(!same_6dp(1.234000, 1.235000));
+    }
+
+    // ────── bezier_from_vmd ──────
+
+    #[test]
+    fn test_bezier_from_vmd_linear() {
+        // interp[0]=20, interp[1]=107, interp[2]=20, interp[3]=107
+        // → BezierCurve::new(ax=20/127, ay=20/127, bx=107/127, by=107/127) = linear
+        let mut interp = [0u8; 24];
+        interp[0] = 20; interp[1] = 107; interp[2] = 20; interp[3] = 107;
+        let b = bezier_from_vmd(&interp, 0);
+        assert!(b.is_linear());
+    }
+
+    #[test]
+    fn test_bezier_from_vmd_mapping() {
+        // ax=interp[offset], ay=interp[offset+2], bx=interp[offset+1], by=interp[offset+3]
+        // ax≠ay → not linear
+        let mut interp = [0u8; 24];
+        interp[0] = 10; interp[1] = 50; interp[2] = 30; interp[3] = 70;
+        let b = bezier_from_vmd(&interp, 0);
+        assert!(!b.is_linear()); // ax=10/127 ≠ ay=30/127
+        // evaluate(0) と evaluate(1) は常に 0 と 1
+        assert!((b.evaluate(0.0) - 0.0).abs() < 1e-5);
+        assert!((b.evaluate(1.0) - 1.0).abs() < 1e-5);
+    }
+
+    // ────── bezier_from_pmm_interp ──────
+
+    #[test]
+    fn test_bezier_from_pmm_interp_linear() {
+        use crate::format::pmm::PmmCameraInterp;
+        let interp = PmmCameraInterp {
+            ax: 20.0 / 127.0,
+            ay: 20.0 / 127.0,
+            bx: 107.0 / 127.0,
+            by: 107.0 / 127.0,
+        };
+        let b = bezier_from_pmm_interp(&interp);
+        assert!(b.is_linear());
+    }
+
+    // ────── raw_to_ae ──────
+
+    #[test]
+    fn test_raw_to_ae_position_transform() {
+        // pos=(1,2,3), 1920x1080
+        // AE X = 1*20 + 960 = 980
+        // AE Y = -2*20 + 540 = 500
+        // AE Z = 3*20 = 60
+        let raw = make_camera_raw(0, [1.0, 2.0, 3.0], [0.0; 3], 0.0, 30.0);
+        let kf = raw_to_ae(&raw, 1920, 1080);
+        assert!((kf.position[0] - 980.0).abs() < 1e-5, "X={}", kf.position[0]);
+        assert!((kf.position[1] - 500.0).abs() < 1e-5, "Y={}", kf.position[1]);
+        assert!((kf.position[2] -  60.0).abs() < 1e-5, "Z={}", kf.position[2]);
+    }
+
+    #[test]
+    fn test_raw_to_ae_anchor_z() {
+        // distance=-45 → anchor_z = -(-45)*20 = 900
+        let raw = make_camera_raw(0, [0.0; 3], [0.0; 3], -45.0, 30.0);
+        let kf = raw_to_ae(&raw, 1920, 1080);
+        assert!((kf.anchor_z - 900.0).abs() < 1e-5, "anchor_z={}", kf.anchor_z);
+    }
+
+    #[test]
+    fn test_raw_to_ae_y_rotation() {
+        // rot_y = π/2 → y_rotation = -(π/2) * (180/π) = -90.0
+        let raw = make_camera_raw(0, [0.0; 3], [0.0, std::f64::consts::FRAC_PI_2, 0.0], 0.0, 30.0);
+        let kf = raw_to_ae(&raw, 1920, 1080);
+        assert!((kf.y_rotation - (-90.0)).abs() < 1e-4, "y_rotation={}", kf.y_rotation);
+    }
+
+    // ────── compute_init_zoom ──────
+
+    #[test]
+    fn test_compute_init_zoom_square() {
+        // 正方形 1080x1080 → zoom = 540 / tan(22.5°) ≈ 1303.67
+        let zoom = compute_init_zoom(1080, 1080);
+        assert!((zoom - 1303.67).abs() < 1.0, "zoom={}", zoom);
+    }
+
+    // ────── interpolate_segment ──────
+
+    #[test]
+    fn test_interpolate_segment_single_frame() {
+        // start.frame == end.frame → 1要素
+        let raw = make_camera_raw(5, [0.0; 3], [0.0; 3], 0.0, 30.0);
+        let result = interpolate_segment(&raw, &raw, 1920, 1080);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_interpolate_segment_two_frames_linear() {
+        // frame差=1, linear → [start, end] = 2要素
+        let start = make_camera_raw(0, [0.0; 3], [0.0; 3], 0.0, 30.0);
+        let end   = make_camera_raw(1, [1.0, 0.0, 0.0], [0.0; 3], 0.0, 30.0);
+        let result = interpolate_segment(&start, &end, 1920, 1080);
+        assert_eq!(result.len(), 2);
+    }
+
+    // ────── convert_cameras ──────
+
+    #[test]
+    fn test_convert_cameras_empty() {
+        let result = convert_cameras(&[], 1920, 1080);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_convert_cameras_single_frame() {
+        let raw = make_camera_raw(0, [0.0; 3], [0.0; 3], 0.0, 30.0);
+        let result = convert_cameras(&[raw], 1920, 1080);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].is_keyframe);
+    }
+
+    // ────── interpolate_segment（非線形パス）──────
+
+    #[test]
+    fn test_interpolate_segment_nonlinear_expands_frames() {
+        // 非線形補間 (ax≠ay) でフレーム差>1 → 全フレーム展開
+        let nonlin = BezierCurve::new(0.1, 0.9, 0.5, 0.9); // not linear
+        let lin = linear_bezier();
+        let start = CameraRaw {
+            frame: 0,
+            position: [0.0; 3],
+            rotation: [0.0; 3],
+            distance: 0.0,
+            fov_deg: 30.0,
+            interp: CameraInterpolation {
+                x_move: nonlin, y_move: lin, z_move: lin,
+                rotation: lin, distance: lin, fov: lin,
+            },
+        };
+        let end = CameraRaw {
+            frame: 5,
+            position: [10.0, 0.0, 0.0],
+            rotation: [0.0; 3],
+            distance: 0.0,
+            fov_deg: 30.0,
+            interp: CameraInterpolation {
+                x_move: nonlin, y_move: lin, z_move: lin,
+                rotation: lin, distance: lin, fov: lin,
+            },
+        };
+        let result = interpolate_segment(&start, &end, 1920, 1080);
+        // 非線形 + frame差>1 → 展開される (少なくとも2フレーム)
+        assert!(result.len() >= 2, "expected expanded frames, got {}", result.len());
+        assert_eq!(result[0].frame_no, 0);
+        assert_eq!(result.last().unwrap().frame_no, 5);
+    }
+
+    // ────── interp_camera_raw_at ──────
+
+    #[test]
+    fn test_interp_camera_raw_at_empty() {
+        let (pos, rot, dist, fov) = interp_camera_raw_at(&[], 0);
+        assert_eq!(pos, [0.0; 3]);
+        assert_eq!(rot, [0.0; 3]);
+        assert!((dist - 0.0).abs() < 1e-10);
+        assert!((fov - 30.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_interp_camera_raw_at_before_start() {
+        let raw = make_camera_raw(10, [1.0, 2.0, 3.0], [0.0; 3], -45.0, 30.0);
+        let (pos, _, dist, fov) = interp_camera_raw_at(&[raw], 0);
+        assert!((pos[0] - 1.0).abs() < 1e-10, "pos[0]={}", pos[0]);
+        assert!((dist - (-45.0)).abs() < 1e-10, "dist={}", dist);
+        assert!((fov - 30.0).abs() < 1e-10, "fov={}", fov);
+    }
+
+    #[test]
+    fn test_interp_camera_raw_at_after_end() {
+        let raw = make_camera_raw(0, [1.0, 2.0, 3.0], [0.0; 3], -45.0, 30.0);
+        let (pos, _, dist, _) = interp_camera_raw_at(&[raw], 100);
+        assert!((pos[0] - 1.0).abs() < 1e-10);
+        assert!((dist - (-45.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_interp_camera_raw_at_midpoint_linear() {
+        // frame 0: pos[0]=0, frame 10: pos[0]=10, frame 5 → pos[0]≈5
+        let start = make_camera_raw(0,  [0.0, 0.0, 0.0], [0.0; 3], 0.0, 30.0);
+        let end   = make_camera_raw(10, [10.0, 0.0, 0.0], [0.0; 3], 0.0, 30.0);
+        let (pos, _, _, _) = interp_camera_raw_at(&[start, end], 5);
+        assert!((pos[0] - 5.0).abs() < 0.1, "expected 5.0, got {}", pos[0]);
+    }
+
+    // ────── get_follow_at ──────
+
+    #[test]
+    fn test_get_follow_at_empty() {
+        let result = get_follow_at(&[], 0);
+        assert_eq!(result, (-1, -1));
+    }
+
+    #[test]
+    fn test_get_follow_at_before_any_keyframe() {
+        use crate::format::pmm::PmmCameraInterp;
+        let lin = PmmCameraInterp { ax: 20.0/127.0, ay: 20.0/127.0, bx: 107.0/127.0, by: 107.0/127.0 };
+        let cam = PmmCameraFrame {
+            frame: 10, distance: -45.0, position: [0.0; 3], rotation: [0.0; 3],
+            interp_x: lin, interp_y: lin, interp_z: lin,
+            interp_rotation: lin, interp_distance: lin, interp_fov: lin,
+            is_orth: false, fov_deg: 30.0, follow_model: 2, follow_bone: 5,
+        };
+        // frame=5 < cam.frame=10 → no applicable frame → (-1, -1)
+        let result = get_follow_at(&[cam], 5);
+        assert_eq!(result, (-1, -1));
+    }
+
+    #[test]
+    fn test_get_follow_at_latest_camera() {
+        use crate::format::pmm::PmmCameraInterp;
+        let lin = PmmCameraInterp { ax: 20.0/127.0, ay: 20.0/127.0, bx: 107.0/127.0, by: 107.0/127.0 };
+        let make_cam = |frame: i32, fm: i32, fb: i32| PmmCameraFrame {
+            frame, distance: -45.0, position: [0.0; 3], rotation: [0.0; 3],
+            interp_x: lin, interp_y: lin, interp_z: lin,
+            interp_rotation: lin, interp_distance: lin, interp_fov: lin,
+            is_orth: false, fov_deg: 30.0, follow_model: fm, follow_bone: fb,
+        };
+        let cameras = vec![make_cam(0, -1, -1), make_cam(10, 2, 5), make_cam(20, 3, 7)];
+        // frame 15 → latest at/before 15 = frame 10
+        let (m, b) = get_follow_at(&cameras, 15);
+        assert_eq!(m, 2);
+        assert_eq!(b, 5);
+        // frame 25 → latest at/before 25 = frame 20
+        let (m2, b2) = get_follow_at(&cameras, 25);
+        assert_eq!(m2, 3);
+        assert_eq!(b2, 7);
+    }
+
+    // ────── generate_jsx ──────
+
+    #[test]
+    fn test_generate_jsx_empty_returns_empty_string() {
+        let config = CameraJsxConfig {
+            width: 1920, height: 1080, pixel_aspect: 1.0,
+            fps: 30, comp_name: "C".to_string(), camera_name: "Cam".to_string(),
+        };
+        assert!(generate_jsx(&[], &config).is_empty());
+    }
+
+    #[test]
+    fn test_generate_jsx_contains_header_and_names() {
+        let config = CameraJsxConfig {
+            width: 1920, height: 1080, pixel_aspect: 1.0,
+            fps: 30, comp_name: "TestComp".to_string(), camera_name: "TestCam".to_string(),
+        };
+        let raw = make_camera_raw(0, [0.0; 3], [0.0; 3], -45.0, 30.0);
+        let kfs = convert_cameras(&[raw], 1920, 1080);
+        let jsx = generate_jsx(&kfs, &config);
+        assert!(jsx.contains("MikuMikuDance To After Effects (Camera)"), "header not found");
+        assert!(jsx.contains("TestComp"), "comp name not found");
+        assert!(jsx.contains("TestCam"), "camera name not found");
+    }
+
+    #[test]
+    fn test_generate_jsx_dimensions_and_fps() {
+        let config = CameraJsxConfig {
+            width: 1920, height: 1080, pixel_aspect: 1.0,
+            fps: 30, comp_name: "C".to_string(), camera_name: "Cam".to_string(),
+        };
+        let raw = make_camera_raw(0, [0.0; 3], [0.0; 3], -45.0, 30.0);
+        let kfs = convert_cameras(&[raw], 1920, 1080);
+        let jsx = generate_jsx(&kfs, &config);
+        assert!(jsx.contains("var Width       = 1920;"));
+        assert!(jsx.contains("var Height      = 1080;"));
+        assert!(jsx.contains("var FPS         = 30;"));
+    }
+
+    #[test]
+    fn test_generate_jsx_has_null_and_camera_layers() {
+        let config = CameraJsxConfig {
+            width: 1920, height: 1080, pixel_aspect: 1.0,
+            fps: 30, comp_name: "C".to_string(), camera_name: "Cam".to_string(),
+        };
+        let raw = make_camera_raw(0, [0.0; 3], [0.0; 3], -45.0, 30.0);
+        let kfs = convert_cameras(&[raw], 1920, 1080);
+        let jsx = generate_jsx(&kfs, &config);
+        assert!(jsx.contains("layNully"), "layNully not found");
+        assert!(jsx.contains("layNullx"), "layNullx not found");
+        assert!(jsx.contains("layCam"), "layCam not found");
+        assert!(jsx.contains("setValueAtTime"), "no setValueAtTime found");
+    }
+
+    #[test]
+    fn test_generate_jsx_keyframe_label() {
+        // is_keyframe=true → "//- Keyframe ---" (not Bezier)
+        let config = CameraJsxConfig {
+            width: 1920, height: 1080, pixel_aspect: 1.0,
+            fps: 30, comp_name: "C".to_string(), camera_name: "Cam".to_string(),
+        };
+        let raw = make_camera_raw(0, [0.0; 3], [0.0; 3], -45.0, 30.0);
+        let kfs = convert_cameras(&[raw], 1920, 1080);
+        let jsx = generate_jsx(&kfs, &config);
+        assert!(jsx.contains("//- Keyframe ---"), "keyframe label not found");
+    }
+}
+
 /// PMMカメラを変換してJSXを出力（path=None で標準出力）
 ///
 /// `all_pmx_bones`: 各モデルのPMXボーンリスト（ボーン追従計算に使用、None=PMX未ロード）
