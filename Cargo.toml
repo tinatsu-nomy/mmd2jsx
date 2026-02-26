@@ -1,0 +1,9 @@
+[package]
+name = "mmd2jsx"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+encoding_rs = "0.8"      # Shift JIS デコード
+clap = { version = "4", features = ["derive"] }  # CLIオプション解析
+glam = "0.29"
