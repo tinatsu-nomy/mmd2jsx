@@ -6,78 +6,28 @@ use crate::format::pmm::{PmmCameraFrame, PmmCameraInterp, PmmData};
 use crate::format::pmx::PmxBone;
 use crate::jsx::bone::emit_jsx;
 use crate::motion::interpolation;
+use crate::motion::bezier::BezierCurve;
 use std::io;
 use std::path::Path;
 
 // ─────────────────────────────────────────────
-// ベジェ補間
+// ベジェ補間ヘルパー
 // ─────────────────────────────────────────────
 
-/// ベジェ曲線補間パラメータ
-/// P0=(0,0), P1=(ax,ay), P2=(bx,by), P3=(1,1) の3次ベジェ
-#[derive(Debug, Clone, Copy)]
-struct BezierCurve {
-    ax: f64,
-    ay: f64,
-    bx: f64,
-    by: f64,
+/// VMDカメラ補間配列から BezierCurve を生成（バイト順: [ax, bx, ay, by]、値域 0-127）
+fn bezier_from_vmd(interp: &[u8; 24], offset: usize) -> BezierCurve {
+    const N: f64 = 127.0;
+    BezierCurve::new(
+        interp[offset]     as f64 / N,   // ax
+        interp[offset + 2] as f64 / N,   // ay
+        interp[offset + 1] as f64 / N,   // bx
+        interp[offset + 3] as f64 / N,   // by
+    )
 }
 
-impl BezierCurve {
-    /// VMDカメラ補間配列から生成（バイト順: [ax, bx, ay, by]、値域 0-127）
-    fn from_vmd(interpolation: &[u8; 24], offset: usize) -> Self {
-        const NORM: f64 = 127.0;
-        BezierCurve {
-            ax: interpolation[offset]     as f64 / NORM,
-            bx: interpolation[offset + 1] as f64 / NORM,
-            ay: interpolation[offset + 2] as f64 / NORM,
-            by: interpolation[offset + 3] as f64 / NORM,
-        }
-    }
-
-    /// PMM補間パラメータから生成
-    fn from_interp(c: &PmmCameraInterp) -> Self {
-        BezierCurve {
-            ax: c.ax as f64,
-            ay: c.ay as f64,
-            bx: c.bx as f64,
-            by: c.by as f64,
-        }
-    }
-
-    /// 線形補間かどうか（ax==ay かつ bx==by）
-    fn is_linear(&self) -> bool {
-        self.ax == self.ay && self.bx == self.by
-    }
-
-    /// x に対する y 値を計算（2分探索でtを求め、Yを返す）
-    fn evaluate(&self, x: f64) -> f64 {
-        let t = self.find_t(x);
-        self.bezier_y(t)
-    }
-
-    fn find_t(&self, target_x: f64) -> f64 {
-        let mut lo = 0.0_f64;
-        let mut hi = 1.0_f64;
-        let mut t = target_x;
-        for _ in 0..20 {
-            let diff = self.bezier_x(t) - target_x;
-            if diff.abs() < 1e-6 { break; }
-            if diff > 0.0 { hi = t; } else { lo = t; }
-            t = (lo + hi) / 2.0;
-        }
-        t
-    }
-
-    fn bezier_x(&self, t: f64) -> f64 {
-        let mt = 1.0 - t;
-        3.0 * mt * mt * t * self.ax + 3.0 * mt * t * t * self.bx + t * t * t
-    }
-
-    fn bezier_y(&self, t: f64) -> f64 {
-        let mt = 1.0 - t;
-        3.0 * mt * mt * t * self.ay + 3.0 * mt * t * t * self.by + t * t * t
-    }
+/// PMM補間パラメータから BezierCurve を生成
+fn bezier_from_pmm_interp(c: &PmmCameraInterp) -> BezierCurve {
+    BezierCurve::new(c.ax as f64, c.ay as f64, c.bx as f64, c.by as f64)
 }
 
 /// カメラ各パラメータのベジェ曲線セット
@@ -93,23 +43,23 @@ struct CameraInterpolation {
 impl CameraInterpolation {
     fn from_vmd(interpolation: &[u8; 24]) -> Self {
         CameraInterpolation {
-            x_move:   BezierCurve::from_vmd(interpolation, 0),
-            y_move:   BezierCurve::from_vmd(interpolation, 4),
-            z_move:   BezierCurve::from_vmd(interpolation, 8),
-            rotation: BezierCurve::from_vmd(interpolation, 12),
-            distance: BezierCurve::from_vmd(interpolation, 16),
-            fov:      BezierCurve::from_vmd(interpolation, 20),
+            x_move:   bezier_from_vmd(interpolation, 0),
+            y_move:   bezier_from_vmd(interpolation, 4),
+            z_move:   bezier_from_vmd(interpolation, 8),
+            rotation: bezier_from_vmd(interpolation, 12),
+            distance: bezier_from_vmd(interpolation, 16),
+            fov:      bezier_from_vmd(interpolation, 20),
         }
     }
 
     fn from_pmm(cam: &PmmCameraFrame) -> Self {
         CameraInterpolation {
-            x_move:   BezierCurve::from_interp(&cam.interp_x),
-            y_move:   BezierCurve::from_interp(&cam.interp_y),
-            z_move:   BezierCurve::from_interp(&cam.interp_z),
-            rotation: BezierCurve::from_interp(&cam.interp_rotation),
-            distance: BezierCurve::from_interp(&cam.interp_distance),
-            fov:      BezierCurve::from_interp(&cam.interp_fov),
+            x_move:   bezier_from_pmm_interp(&cam.interp_x),
+            y_move:   bezier_from_pmm_interp(&cam.interp_y),
+            z_move:   bezier_from_pmm_interp(&cam.interp_z),
+            rotation: bezier_from_pmm_interp(&cam.interp_rotation),
+            distance: bezier_from_pmm_interp(&cam.interp_distance),
+            fov:      bezier_from_pmm_interp(&cam.interp_fov),
         }
     }
 }
@@ -532,6 +482,7 @@ fn generate_jsx(keyframes: &[AeCameraKeyframe], config: &CameraJsxConfig) -> Str
     let mut s = String::new();
     s.push_str("//=================================================================\n");
     s.push_str("// MikuMikuDance To After Effects (Camera)\n");
+    s.push_str("// Reference: (C) 2010 Programmed by 遊太郎\n");
     s.push_str("//=================================================================\n\n");
     s.push_str("//- Composition Settings ------------------------------------------\n");
     s.push_str(&format!("var Width       = {};\n", config.width));
@@ -582,9 +533,9 @@ fn generate_jsx(keyframes: &[AeCameraKeyframe], config: &CameraJsxConfig) -> Str
 
         let t = kf.frame_no as f64 / config.fps as f64;
         if kf.is_keyframe {
-            s.push_str("//- Keyframe --------------------------------------------------\n");
+            s.push_str("//- Keyframe ------------------------------------------------------\n");
         } else {
-            s.push_str("//- Keyframe (Bezier) ------------------------------------------\n");
+            s.push_str("//- Keyframe (Bezier) ----------------------------------------------\n");
         }
 
         if kf.out_position {

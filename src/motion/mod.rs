@@ -3,3 +3,4 @@
 
 pub mod transform;
 pub mod interpolation;
+pub mod bezier;

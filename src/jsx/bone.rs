@@ -43,6 +43,7 @@ fn generate_jsx(all_frames: &[Vec<FrameData>], config: &JsxConfig) -> String {
 
     s.push_str("//=================================================================\n");
     s.push_str("// MikuMikuDance To After Effects (Bone)\n");
+    s.push_str("// Reference: (C) 2010 Programmed by 遊太郎\n");
     s.push_str("//=================================================================\n");
     s.push('\n');
     s.push_str("//- Composition Settings ------------------------------------------\n");
@@ -52,7 +53,8 @@ fn generate_jsx(all_frames: &[Vec<FrameData>], config: &JsxConfig) -> String {
     s.push_str(&format!("var Duration    = {:.6};\n", duration));
     s.push_str(&format!("var FPS         = {};\n", config.fps));
     s.push('\n');
-    s.push_str("//- Add Layers ---------------------------------------------------\n");
+
+    s.push_str("//- Add Layers ----------------------------------------------------\n");
     s.push_str(&format!(
         "var newComp  = app.project.items.addComp( \"{}\", Width, Height, AspectRatio, Duration, FPS );\n",
         config.comp_name
@@ -73,7 +75,7 @@ fn generate_jsx(all_frames: &[Vec<FrameData>], config: &JsxConfig) -> String {
     }
 
     s.push('\n');
-    s.push_str("//- Add Frames ---------------------------------------------------\n");
+    s.push_str("//- Add Frames ----------------------------------------------------\n");
     for (bone_idx, (bone_name, frames)) in config.bone_names.iter().zip(all_frames.iter()).enumerate() {
         for (n, fd) in frames.iter().enumerate() {
             let time = fd.frame as f64 / config.fps as f64;

@@ -6,6 +6,7 @@ use crate::format::pmm::{BoneFrame, ExternParentEntry, InterpolationCurve, PmmBo
 use crate::format::pmx::PmxBone;
 use crate::jsx::bone::FrameData;
 use super::transform;
+use super::bezier::BezierCurve;
 use std::collections::HashMap;
 use glam::{Mat4, Quat, Vec3};
 
@@ -13,45 +14,11 @@ use glam::{Mat4, Quat, Vec3};
 // ベジェ補間ヘルパー
 // ─────────────────────────────────────────────
 
-/// MMD三次ベジェ補間の重みを計算する
-///
-/// 制御点: P0=(0,0), P1=(x1,y1), P2=(x2,y2), P3=(127,127)
-/// - 入力 t: 正規化時刻 [0.0, 1.0]
-/// - 出力: 補間重み [0.0, 1.0]
-fn bezier_y(curve: &InterpolationCurve, t: f32) -> f32 {
-    let x1 = curve.x1 as f32;
-    let y1 = curve.y1 as f32;
-    let x2 = curve.x2 as f32;
-    let y2 = curve.y2 as f32;
-
-    let t_raw = t * 127.0;
-    let u = solve_bezier_x(x1, x2, t_raw);
-
-    let inv = 1.0 - u;
-    let by = 3.0 * inv * inv * u * y1
-           + 3.0 * inv * u * u * y2
-           + u * u * u * 127.0;
-    by / 127.0
-}
-
-/// ニュートン法: Bx(u) = x_raw となるベジェパラメータ u ∈ [0,1] を求める
-fn solve_bezier_x(x1: f32, x2: f32, x_raw: f32) -> f32 {
-    let mut u = x_raw / 127.0;
-    for _ in 0..16 {
-        let inv = 1.0 - u;
-        let bx = 3.0 * inv * inv * u * x1
-               + 3.0 * inv * u * u * x2
-               + u * u * u * 127.0;
-        let diff = bx - x_raw;
-        if diff.abs() < 1e-4 { break; }
-        let dbx = 3.0 * inv * (1.0 - 3.0 * u) * x1
-                + 3.0 * u * (2.0 - 3.0 * u) * x2
-                + 3.0 * u * u * 127.0;
-        if dbx.abs() < 1e-10 { break; }
-        u -= diff / dbx;
-        u = u.clamp(0.0, 1.0);
-    }
-    u
+/// InterpolationCurve（0-127スケール）を BezierCurve（0-1正規化）に変換
+#[inline]
+fn to_bezier(c: &InterpolationCurve) -> BezierCurve {
+    const N: f64 = 127.0;
+    BezierCurve::new(c.x1 as f64 / N, c.y1 as f64 / N, c.x2 as f64 / N, c.y2 as f64 / N)
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -60,7 +27,11 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 
 /// ベジェ補間（各軸独立）
 fn interp_value(a: f32, b: f32, t: f32, curve: &InterpolationCurve) -> f32 {
-    if curve.is_linear() { lerp(a, b, t) } else { lerp(a, b, bezier_y(curve, t)) }
+    if curve.is_linear() {
+        lerp(a, b, t)
+    } else {
+        lerp(a, b, to_bezier(curve).evaluate(t as f64) as f32)
+    }
 }
 
 /// キーフレーム間がベジェ補間を必要とするか
@@ -105,7 +76,7 @@ fn interp_bone_at_frame(bone: &PmmBone, frame: i32) -> (Vec3, Quat) {
     let mx = interp_value(fa.movement.x, fb.movement.x, t, &fb.interp_x);
     let my = interp_value(fa.movement.y, fb.movement.y, t, &fb.interp_y);
     let mz = interp_value(fa.movement.z, fb.movement.z, t, &fb.interp_z);
-    let rot_t = bezier_y(&fb.interp_rot, t);
+    let rot_t = to_bezier(&fb.interp_rot).evaluate(t as f64) as f32;
     let rot = fa.rotation.slerp(fb.rotation, rot_t);
 
     (Vec3::new(mx, my, mz), rot)
