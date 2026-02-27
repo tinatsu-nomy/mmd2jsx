@@ -2,7 +2,7 @@
 // PMMキーフレームをベジェ補間し、FK/IK 計算を経て全フレームの位置データを構築する。
 
 use crate::format::pmm::{BoneFrame, ExternParentEntry, InterpolationCurve, PmmBone, PmmModel,
-                 PmmData, ConfigFrame};
+                 PmmData};
 use crate::format::pmx::PmxBone;
 use crate::jsx::bone::FrameData;
 use super::transform;
@@ -34,8 +34,8 @@ fn interp_value(a: f32, b: f32, t: f32, curve: &InterpolationCurve) -> f32 {
     }
 }
 
-/// キーフレーム間がベジェ補間を必要とするか
-fn needs_bezier(_fa: &BoneFrame, fb: &BoneFrame) -> bool {
+/// キーフレーム間がベジェ補間を必要とするか（終端フレームの補間曲線で判定）
+fn needs_bezier(fb: &BoneFrame) -> bool {
     !fb.interp_x.is_linear()
         || !fb.interp_y.is_linear()
         || !fb.interp_z.is_linear()
@@ -57,7 +57,7 @@ fn interp_bone_at_frame(bone: &PmmBone, frame: i32) -> (Vec3, Quat) {
         return (frames[0].movement, frames[0].rotation);
     }
 
-    let last = frames.last().unwrap();
+    let last = frames.last().expect("frames is non-empty (checked above)");
     if frame >= last.frame {
         return (last.movement, last.rotation);
     }
@@ -82,31 +82,23 @@ fn interp_bone_at_frame(bone: &PmmBone, frame: i32) -> (Vec3, Quat) {
     (Vec3::new(mx, my, mz), rot)
 }
 
-/// 指定フレームの IK 有効状態を取得する
-fn get_ik_enabled_at(pmm_model: &PmmModel, frame: i32) -> Vec<bool> {
-    let applicable = pmm_model
-        .config_frames
-        .iter()
-        .filter(|cf| cf.frame <= frame)
-        .max_by_key(|cf| cf.frame);
-
-    match applicable {
-        Some(cf) => cf.ik_enabled.clone(),
-        None => pmm_model.initial_ik_state.clone(),
+/// 指定フレームの IK 有効状態を取得する（config_frames はフレーム昇順前提）
+fn get_ik_enabled_at(pmm_model: &PmmModel, frame: i32) -> &[bool] {
+    let idx = pmm_model.config_frames.partition_point(|cf| cf.frame <= frame);
+    if idx > 0 {
+        &pmm_model.config_frames[idx - 1].ik_enabled
+    } else {
+        &pmm_model.initial_ik_state
     }
 }
 
-/// 指定フレームの外部親情報を取得する
+/// 指定フレームの外部親情報を取得する（config_frames はフレーム昇順前提）
 fn get_extern_parents_at(pmm_model: &PmmModel, frame: i32) -> &[ExternParentEntry] {
-    let applicable = pmm_model
-        .config_frames
-        .iter()
-        .filter(|cf| cf.frame <= frame)
-        .max_by_key(|cf| cf.frame);
-
-    match applicable {
-        Some(cf) => &cf.extern_parents,
-        None => &pmm_model.initial_extern_parents,
+    let idx = pmm_model.config_frames.partition_point(|cf| cf.frame <= frame);
+    if idx > 0 {
+        &pmm_model.config_frames[idx - 1].extern_parents
+    } else {
+        &pmm_model.initial_extern_parents
     }
 }
 
@@ -141,7 +133,7 @@ pub(crate) fn compute_model_world_transforms_at(
         pmx_bones,
         &movements,
         &rotations,
-        &ik_enabled,
+        ik_enabled,
         &pmm_model.ik_bone_indices,
         &HashMap::new(), // 外部親の外部親は再帰防止のため無視
     ))
@@ -170,15 +162,9 @@ fn build_extern_parent_mats(
     pmm_model: &PmmModel,
     pmx_bones: &[PmxBone],
     all_pmx_bones: &[Option<Vec<PmxBone>>],
+    model_id_to_arr: &HashMap<u8, usize>,
     frame: i32,
 ) -> HashMap<usize, Mat4> {
-    let model_id_to_arr: HashMap<u8, usize> = pmm_data
-        .models
-        .iter()
-        .enumerate()
-        .map(|(arr_idx, m)| (m.model_id, arr_idx))
-        .collect();
-
     let mut result = HashMap::new();
     let extern_parents = get_extern_parents_at(pmm_model, frame);
 
@@ -205,19 +191,18 @@ fn build_extern_parent_mats(
             continue;
         }
 
-        if !cache.contains_key(&ref_arr_idx) {
-            if let Some(transforms) =
+        if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(ref_arr_idx)
+            && let Some(transforms) =
                 compute_model_world_transforms_at(pmm_data, ref_arr_idx, all_pmx_bones, frame)
-            {
-                cache.insert(ref_arr_idx, transforms);
-            }
+        {
+            e.insert(transforms);
         }
 
-        if let Some(ref_transforms) = cache.get(&ref_arr_idx) {
-            if ref_bone_idx < ref_transforms.len() {
-                let (pos, rot) = ref_transforms[ref_bone_idx];
-                result.insert(target_pmx_bone_idx, Mat4::from_rotation_translation(rot, pos));
-            }
+        if let Some(ref_transforms) = cache.get(&ref_arr_idx)
+            && ref_bone_idx < ref_transforms.len()
+        {
+            let (pos, rot) = ref_transforms[ref_bone_idx];
+            result.insert(target_pmx_bone_idx, Mat4::from_rotation_translation(rot, pos));
         }
     }
 
@@ -225,16 +210,109 @@ fn build_extern_parent_mats(
 }
 
 // ─────────────────────────────────────────────
-// メイン公開関数
+// フレーム範囲・ワールド座標計算ヘルパー
 // ─────────────────────────────────────────────
 
 /// ワールド座標が実質的に等しいか判定（浮動小数点誤差を許容）
-fn frames_approx_equal(a: (f32, f32, f32), b: (f32, f32, f32)) -> bool {
-    const EPS: f32 = 1e-6;
-    (a.0 - b.0).abs() < EPS
-        && (a.1 - b.1).abs() < EPS
-        && (a.2 - b.2).abs() < EPS
+fn frames_approx_equal(a: Vec3, b: Vec3) -> bool {
+    a.abs_diff_eq(b, 1e-6)
 }
+
+/// 外部親を考慮したフレーム範囲を計算する
+fn calc_frame_range_with_extern(
+    pmm_data: &PmmData,
+    pmm_model_idx: usize,
+    pmm_model: &PmmModel,
+    model_id_to_arr: &HashMap<u8, usize>,
+    default_first: i32,
+    default_last: i32,
+) -> (i32, i32) {
+    let mut ref_arr_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+    let all_ep_lists = std::iter::once(pmm_model.initial_extern_parents.as_slice())
+        .chain(pmm_model.config_frames.iter().map(|cf| cf.extern_parents.as_slice()));
+
+    for ep_list in all_ep_lists {
+        for ep in ep_list {
+            if ep.model_index < 0 { continue; }
+            let ref_id = ep.model_index as u8;
+            if let Some(&arr_idx) = model_id_to_arr.get(&ref_id)
+                && arr_idx != pmm_model_idx
+            {
+                ref_arr_indices.insert(arr_idx);
+            }
+        }
+    }
+
+    let mut first_frame = default_first;
+    let mut last_frame = default_last;
+
+    for arr_idx in ref_arr_indices {
+        if let Some(ref_model) = pmm_data.models.get(arr_idx) {
+            if let Some(ref_first) = ref_model.bones.iter()
+                .filter_map(|b| b.frames.first().map(|f| f.frame)).min()
+            {
+                first_frame = first_frame.min(ref_first);
+            }
+            if let Some(ref_last) = ref_model.bones.iter()
+                .filter_map(|b| b.frames.last().map(|f| f.frame)).max()
+            {
+                last_frame = last_frame.max(ref_last);
+            }
+        }
+    }
+
+    (first_frame, last_frame)
+}
+
+/// 指定フレームでの対象ボーンのワールド位置を計算する（FK/IK/外部親込み）
+// FK計算に必要なコンテキスト（PMM/PMX両方のデータ）を全て受け取るため引数が多い
+#[expect(clippy::too_many_arguments)]
+fn compute_world_pos_at(
+    pmm_data: &PmmData,
+    pmm_model_idx: usize,
+    pmm_model: &PmmModel,
+    pmx_bones: &[PmxBone],
+    pmx_to_pmm: &[Option<usize>],
+    target_pmx_idx: Option<usize>,
+    target_bone: &PmmBone,
+    all_pmx_bones: &[Option<Vec<PmxBone>>],
+    model_id_to_arr: &HashMap<u8, usize>,
+    frame: i32,
+) -> Vec3 {
+    let mut movements: Vec<Vec3> = vec![Vec3::ZERO; pmx_bones.len()];
+    let mut rotations: Vec<Quat> = vec![Quat::IDENTITY; pmx_bones.len()];
+
+    for pmx_idx in 0..pmx_bones.len() {
+        if let Some(pmm_idx) = pmx_to_pmm[pmx_idx] {
+            let (mov, rot) = interp_bone_at_frame(&pmm_model.bones[pmm_idx], frame);
+            movements[pmx_idx] = mov;
+            rotations[pmx_idx] = rot;
+        }
+    }
+
+    let ik_enabled = get_ik_enabled_at(pmm_model, frame);
+
+    let extern_parent_mats = build_extern_parent_mats(
+        pmm_data, pmm_model_idx, pmm_model, pmx_bones, all_pmx_bones, model_id_to_arr, frame,
+    );
+
+    let world_transforms = transform::compute_world_transforms(
+        pmx_bones, &movements, &rotations, ik_enabled,
+        &pmm_model.ik_bone_indices, &extern_parent_mats,
+    );
+
+    if let Some(pmx_idx) = target_pmx_idx {
+        world_transforms[pmx_idx].0
+    } else {
+        let (mov, _) = interp_bone_at_frame(target_bone, frame);
+        mov
+    }
+}
+
+// ─────────────────────────────────────────────
+// メイン公開関数
+// ─────────────────────────────────────────────
 
 /// 全ボーンのフレームデータを計算して対象ボーンの出力データを返す
 pub fn build_frames(
@@ -247,9 +325,8 @@ pub fn build_frames(
 ) -> Vec<FrameData> {
     let pmm_model = &pmm_data.models[pmm_model_idx];
     let target_bone = &pmm_model.bones[target_bone_idx];
-    let frames = &target_bone.frames;
 
-    if frames.is_empty() {
+    if target_bone.frames.is_empty() {
         return Vec::new();
     }
 
@@ -260,7 +337,29 @@ pub fn build_frames(
         return build_frames_no_fk(target_bone, all_frames);
     }
 
-    let pmx_bones = pmx_bones_opt.unwrap();
+    build_frames_with_fk(
+        pmm_data,
+        pmm_model_idx,
+        pmm_model,
+        pmx_bones_opt.unwrap(),
+        all_pmx_bones,
+        target_bone_idx,
+        all_frames,
+    )
+}
+
+/// FK/IK計算ありのフレームデータ構築
+fn build_frames_with_fk(
+    pmm_data: &PmmData,
+    pmm_model_idx: usize,
+    pmm_model: &PmmModel,
+    pmx_bones: &[PmxBone],
+    all_pmx_bones: &[Option<Vec<PmxBone>>],
+    target_bone_idx: usize,
+    all_frames: bool,
+) -> Vec<FrameData> {
+    let target_bone = &pmm_model.bones[target_bone_idx];
+    let frames = &target_bone.frames;
 
     let pmx_to_pmm: Vec<Option<usize>> = pmx_bones
         .iter()
@@ -269,120 +368,51 @@ pub fn build_frames(
 
     let target_pmx_idx = pmx_bones.iter().position(|b| b.name == target_bone.name);
 
-    let compute_world_pos = |frame: i32| -> (f32, f32, f32) {
-        let mut movements: Vec<Vec3> = vec![Vec3::ZERO; pmx_bones.len()];
-        let mut rotations: Vec<Quat> = vec![Quat::IDENTITY; pmx_bones.len()];
+    let model_id_to_arr: HashMap<u8, usize> = pmm_data.models.iter()
+        .enumerate()
+        .map(|(arr_idx, m)| (m.model_id, arr_idx))
+        .collect();
 
-        for pmx_idx in 0..pmx_bones.len() {
-            if let Some(pmm_idx) = pmx_to_pmm[pmx_idx] {
-                let (mov, rot) = interp_bone_at_frame(&pmm_model.bones[pmm_idx], frame);
-                movements[pmx_idx] = mov;
-                rotations[pmx_idx] = rot;
-            }
-        }
-
-        let ik_enabled = get_ik_enabled_at(pmm_model, frame);
-
-        let extern_parent_mats = build_extern_parent_mats(
-            pmm_data, pmm_model_idx, pmm_model, pmx_bones, all_pmx_bones, frame,
-        );
-
-        let world_transforms = transform::compute_world_transforms(
-            pmx_bones, &movements, &rotations, &ik_enabled,
-            &pmm_model.ik_bone_indices, &extern_parent_mats,
-        );
-
-        if let Some(pmx_idx) = target_pmx_idx {
-            let (pos, _rot) = world_transforms[pmx_idx];
-            (pos.x, pos.y, pos.z)
-        } else {
-            let (mov, _rot) = interp_bone_at_frame(target_bone, frame);
-            (mov.x, mov.y, mov.z)
-        }
+    let get_pos = |frame: i32| -> Vec3 {
+        compute_world_pos_at(
+            pmm_data, pmm_model_idx, pmm_model, pmx_bones,
+            &pmx_to_pmm, target_pmx_idx, target_bone, all_pmx_bones, &model_id_to_arr, frame,
+        )
     };
 
     // ─── 全フレームモード ───
     if all_frames {
-        let mut first_frame = pmm_model
-            .bones
-            .iter()
+        let default_first = pmm_model.bones.iter()
             .filter_map(|b| b.frames.first().map(|f| f.frame))
             .min()
             .unwrap_or(frames[0].frame);
-        let mut last_frame = pmm_model
-            .bones
-            .iter()
+        let default_last = pmm_model.bones.iter()
             .filter_map(|b| b.frames.last().map(|f| f.frame))
             .max()
             .unwrap_or(frames.last().unwrap().frame);
 
-        {
-            let model_id_to_arr: HashMap<u8, usize> = pmm_data
-                .models
-                .iter()
-                .enumerate()
-                .map(|(arr_idx, m)| (m.model_id, arr_idx))
-                .collect();
-
-            let mut ref_arr_indices: std::collections::HashSet<usize> =
-                std::collections::HashSet::new();
-
-            let all_ep_lists = std::iter::once(pmm_model.initial_extern_parents.as_slice())
-                .chain(pmm_model.config_frames.iter().map(|cf| cf.extern_parents.as_slice()));
-
-            for ep_list in all_ep_lists {
-                for ep in ep_list {
-                    if ep.model_index < 0 { continue; }
-                    let ref_id = ep.model_index as u8;
-                    if let Some(&arr_idx) = model_id_to_arr.get(&ref_id) {
-                        if arr_idx != pmm_model_idx {
-                            ref_arr_indices.insert(arr_idx);
-                        }
-                    }
-                }
-            }
-
-            for arr_idx in ref_arr_indices {
-                if let Some(ref_model) = pmm_data.models.get(arr_idx) {
-                    if let Some(ref_first) = ref_model.bones.iter()
-                        .filter_map(|b| b.frames.first().map(|f| f.frame)).min()
-                    {
-                        first_frame = first_frame.min(ref_first);
-                    }
-                    if let Some(ref_last) = ref_model.bones.iter()
-                        .filter_map(|b| b.frames.last().map(|f| f.frame)).max()
-                    {
-                        last_frame = last_frame.max(ref_last);
-                    }
-                }
-            }
-        }
+        let (first_frame, last_frame) = calc_frame_range_with_extern(
+            pmm_data, pmm_model_idx, pmm_model, &model_id_to_arr, default_first, default_last,
+        );
 
         let mut result = Vec::new();
-        let mut prev_key: Option<(f32, f32, f32)> = None;
+        let mut prev_pos: Option<Vec3> = None;
 
         for frame_no in first_frame..=last_frame {
-            let (wx, wy, wz) = compute_world_pos(frame_no);
-            let cur_key = (wx, wy, wz);
-
-            if let Some(p) = prev_key {
-                if frames_approx_equal(p, cur_key) {
-                    prev_key = Some(cur_key);
-                    continue;
-                }
+            let world_pos = get_pos(frame_no);
+            if let Some(p) = prev_pos && frames_approx_equal(p, world_pos) {
+                prev_pos = Some(world_pos);
+                continue;
             }
-
-            result.push(FrameData { frame: frame_no, world_x: wx, world_y: wy, world_z: wz });
-            prev_key = Some(cur_key);
+            result.push(FrameData { frame: frame_no, world_pos });
+            prev_pos = Some(world_pos);
         }
         return result;
     }
 
     // ─── キーフレームのみモード ───
     let mut result = Vec::new();
-
-    let (wx, wy, wz) = compute_world_pos(frames[0].frame);
-    result.push(FrameData { frame: frames[0].frame, world_x: wx, world_y: wy, world_z: wz });
+    result.push(FrameData { frame: frames[0].frame, world_pos: get_pos(frames[0].frame) });
 
     for window in frames.windows(2) {
         let fa = &window[0];
@@ -391,15 +421,13 @@ pub fn build_frames(
 
         if frame_diff <= 0 { continue; }
 
-        if needs_bezier(fa, fb) {
+        if needs_bezier(fb) {
             for f in 1..=frame_diff {
                 let frame = fa.frame + f;
-                let (wx, wy, wz) = compute_world_pos(frame);
-                result.push(FrameData { frame, world_x: wx, world_y: wy, world_z: wz });
+                result.push(FrameData { frame, world_pos: get_pos(frame) });
             }
         } else {
-            let (wx, wy, wz) = compute_world_pos(fb.frame);
-            result.push(FrameData { frame: fb.frame, world_x: wx, world_y: wy, world_z: wz });
+            result.push(FrameData { frame: fb.frame, world_pos: get_pos(fb.frame) });
         }
     }
 
@@ -414,27 +442,22 @@ fn build_frames_no_fk(target_bone: &PmmBone, all_frames: bool) -> Vec<FrameData>
     if all_frames {
         let first_frame = frames[0].frame;
         let last_frame = frames.last().unwrap().frame;
-        let mut prev_key: Option<(f32, f32, f32)> = None;
+        let mut prev_pos: Option<Vec3> = None;
 
         for frame_no in first_frame..=last_frame {
             let (mov, _) = interp_bone_at_frame(target_bone, frame_no);
-            let cur_key = (mov.x, mov.y, mov.z);
-
-            if let Some(p) = prev_key {
-                if frames_approx_equal(p, cur_key) {
-                    prev_key = Some(cur_key);
-                    continue;
-                }
+            if let Some(p) = prev_pos && frames_approx_equal(p, mov) {
+                prev_pos = Some(mov);
+                continue;
             }
-
-            result.push(FrameData { frame: frame_no, world_x: mov.x, world_y: mov.y, world_z: mov.z });
-            prev_key = Some(cur_key);
+            result.push(FrameData { frame: frame_no, world_pos: mov });
+            prev_pos = Some(mov);
         }
         return result;
     }
 
     let f0 = &frames[0];
-    result.push(FrameData { frame: f0.frame, world_x: f0.movement.x, world_y: f0.movement.y, world_z: f0.movement.z });
+    result.push(FrameData { frame: f0.frame, world_pos: f0.movement });
 
     for window in frames.windows(2) {
         let fa = &window[0];
@@ -443,31 +466,26 @@ fn build_frames_no_fk(target_bone: &PmmBone, all_frames: bool) -> Vec<FrameData>
 
         if frame_diff <= 0 { continue; }
 
-        if needs_bezier(fa, fb) {
+        if needs_bezier(fb) {
             for f in 1..=frame_diff {
                 let t = f as f32 / frame_diff as f32;
                 let mx = interp_value(fa.movement.x, fb.movement.x, t, &fb.interp_x);
                 let my = interp_value(fa.movement.y, fb.movement.y, t, &fb.interp_y);
                 let mz = interp_value(fa.movement.z, fb.movement.z, t, &fb.interp_z);
-                result.push(FrameData { frame: fa.frame + f, world_x: mx, world_y: my, world_z: mz });
+                result.push(FrameData { frame: fa.frame + f, world_pos: Vec3::new(mx, my, mz) });
             }
         } else {
-            result.push(FrameData { frame: fb.frame, world_x: fb.movement.x, world_y: fb.movement.y, world_z: fb.movement.z });
+            result.push(FrameData { frame: fb.frame, world_pos: fb.movement });
         }
     }
 
     result
 }
 
-// interpolation.rs が直接参照していないが pmm からインポートした ConfigFrame を使わないと
-// dead_code 警告が出るため suppress する
-#[allow(dead_code)]
-fn _use_config_frame(_: &ConfigFrame) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::pmm::{ExternParentEntry, InterpolationCurve, PmmBone, PmmModel, PmmData};
+    use crate::format::pmm::{ConfigFrame, ExternParentEntry, InterpolationCurve, PmmBone, PmmModel, PmmData};
 
     // ────── テストヘルパー ──────
 
@@ -553,35 +571,33 @@ mod tests {
 
     #[test]
     fn test_frames_approx_equal_same() {
-        assert!(frames_approx_equal((1.0, 2.0, 3.0), (1.0, 2.0, 3.0)));
+        assert!(frames_approx_equal(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 2.0, 3.0)));
     }
 
     #[test]
     fn test_frames_approx_equal_diff() {
-        assert!(!frames_approx_equal((1.0, 2.0, 3.0), (1.01, 2.0, 3.0)));
+        assert!(!frames_approx_equal(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.01, 2.0, 3.0)));
     }
 
     #[test]
     fn test_frames_approx_equal_epsilon() {
         // 差 5e-7 < EPS(1e-6) → true
-        assert!(frames_approx_equal((1.0, 2.0, 3.0), (1.0 + 5e-7, 2.0, 3.0)));
+        assert!(frames_approx_equal(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0 + 5e-7, 2.0, 3.0)));
     }
 
     // ────── needs_bezier ──────
 
     #[test]
     fn test_needs_bezier_linear() {
-        let fa = make_bone_frame_at(0, 0.0, 0.0, 0.0);
         let fb = make_bone_frame_at(10, 1.0, 0.0, 0.0);
-        assert!(!needs_bezier(&fa, &fb));
+        assert!(!needs_bezier(&fb));
     }
 
     #[test]
     fn test_needs_bezier_nonlinear_x() {
-        let fa = make_bone_frame_at(0, 0.0, 0.0, 0.0);
         let mut fb = make_bone_frame_at(10, 1.0, 0.0, 0.0);
         fb.interp_x = nonlinear_ic();
-        assert!(needs_bezier(&fa, &fb));
+        assert!(needs_bezier(&fb));
     }
 
     // ────── interp_bone_at_frame ──────
@@ -655,7 +671,7 @@ mod tests {
     fn test_get_extern_parents_at_initial() {
         let ep = ExternParentEntry { model_index: -1, bone_index: -1 };
         let model = PmmModel {
-            initial_extern_parents: vec![ep.clone()],
+            initial_extern_parents: vec![ep],
             config_frames: vec![],
             ..make_pmm_model(vec![])
         };
@@ -679,7 +695,7 @@ mod tests {
         assert_eq!(result.len(), 2, "expected 2 keyframes");
         assert_eq!(result[0].frame, 0);
         assert_eq!(result[1].frame, 10);
-        assert!((result[1].world_x - 10.0).abs() < 1e-5);
+        assert!((result[1].world_pos.x - 10.0).abs() < 1e-5);
     }
 
     #[test]
@@ -731,7 +747,7 @@ mod tests {
         // PMM: parent に Y=5 移動, child に 0 移動
         // child world Y = 5 + 10 = 15
         let pmx_bones = vec![
-            PmxBone {
+            crate::format::pmx::PmxBone {
                 name: "parent".to_string(),
                 position: Vec3::new(0.0, 0.0, 0.0),
                 parent_index: -1,
@@ -739,7 +755,7 @@ mod tests {
                 ik: None, add_bone_index: None, add_ratio: 0.0,
                 is_local_add: false, is_add_rotation: false, is_add_translation: false,
             },
-            PmxBone {
+            crate::format::pmx::PmxBone {
                 name: "child".to_string(),
                 position: Vec3::new(0.0, 10.0, 0.0),
                 parent_index: 0,
@@ -755,14 +771,14 @@ mod tests {
         // target_bone_idx=1 は PMM の child ボーン
         let result = build_frames(&pmm_data, 0, &[Some(pmx_bones)], 1, 30, false);
         assert_eq!(result.len(), 1);
-        assert!((result[0].world_y - 15.0).abs() < 1e-4, "expected y=15.0, got {}", result[0].world_y);
+        assert!((result[0].world_pos.y - 15.0).abs() < 1e-4, "expected y=15.0, got {}", result[0].world_pos.y);
     }
 
     #[test]
     fn test_build_frames_with_fk_all_frames() {
         // PMX FK パス + all_frames=true
         let pmx_bones = vec![
-            PmxBone {
+            crate::format::pmx::PmxBone {
                 name: "Center".to_string(),
                 position: Vec3::ZERO,
                 parent_index: -1,
@@ -787,7 +803,7 @@ mod tests {
     #[test]
     fn test_compute_model_world_transforms_at_single_bone() {
         let pmx_bones = vec![
-            PmxBone {
+            crate::format::pmx::PmxBone {
                 name: "Center".to_string(),
                 position: Vec3::ZERO,
                 parent_index: -1,
@@ -824,7 +840,7 @@ mod tests {
     #[test]
     fn test_get_bone_world_pos_at() {
         let pmx_bones = vec![
-            PmxBone {
+            crate::format::pmx::PmxBone {
                 name: "Center".to_string(),
                 position: Vec3::ZERO,
                 parent_index: -1,
@@ -846,7 +862,7 @@ mod tests {
     #[test]
     fn test_get_bone_world_pos_at_out_of_range() {
         let pmx_bones = vec![
-            PmxBone {
+            crate::format::pmx::PmxBone {
                 name: "Center".to_string(),
                 position: Vec3::ZERO,
                 parent_index: -1,

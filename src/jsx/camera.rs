@@ -10,6 +10,12 @@ use crate::motion::bezier::BezierCurve;
 use std::io;
 use std::path::Path;
 
+/// MMD回転値（ラジアン）→ AE角度（度）変換係数
+const RAD_TO_DEG: f64 = 180.0 / std::f64::consts::PI;
+
+/// MMD座標 → AE座標スケール係数
+const MMD_TO_AE_SCALE: f64 = 20.0;
+
 // ─────────────────────────────────────────────
 // ベジェ補間ヘルパー
 // ─────────────────────────────────────────────
@@ -124,6 +130,16 @@ struct AeCameraKeyframe {
     zoom:       f64,
 }
 
+/// AEカメラの1フレーム分の値（前フレーム比較用）
+struct AeCameraValues {
+    pos: [f64; 3],
+    yr:  f64,
+    xr:  f64,
+    zr:  f64,
+    az:  f64,
+    zm:  f64,
+}
+
 // ─────────────────────────────────────────────
 // 座標変換ヘルパー
 // ─────────────────────────────────────────────
@@ -150,21 +166,20 @@ fn same_6dp(a: f64, b: f64) -> bool {
 /// 内部表現をAEキーフレームに変換（補間なし）
 fn raw_to_ae(raw: &CameraRaw, width: u32, height: u32) -> AeCameraKeyframe {
     let zoom_constant = height as f64 / 2.0;
-    let r2d = 180.0 / std::f64::consts::PI;
     AeCameraKeyframe {
         frame_no: raw.frame,
         is_keyframe: true,
         out_position: true, out_y_rotation: true, out_anchor_z: true,
         out_x_rotation: true, out_z_rotation: true, out_zoom: true,
         position: [
-             raw.position[0] * 20.0 + width  as f64 / 2.0,
-            -raw.position[1] * 20.0 + height as f64 / 2.0,
-             raw.position[2] * 20.0,
+             raw.position[0] * MMD_TO_AE_SCALE + width  as f64 / 2.0,
+            -raw.position[1] * MMD_TO_AE_SCALE + height as f64 / 2.0,
+             raw.position[2] * MMD_TO_AE_SCALE,
         ],
-        y_rotation: -raw.rotation[1] * r2d,
-        anchor_z:   -raw.distance * 20.0,
-        x_rotation:  raw.rotation[0] * r2d,
-        z_rotation:  raw.rotation[2] * r2d,
+        y_rotation: -raw.rotation[1] * RAD_TO_DEG,
+        anchor_z:   -raw.distance * MMD_TO_AE_SCALE,
+        x_rotation:  raw.rotation[0] * RAD_TO_DEG,
+        z_rotation:  raw.rotation[2] * RAD_TO_DEG,
         zoom: fov_to_zoom(raw.fov_deg, zoom_constant),
     }
 }
@@ -179,7 +194,6 @@ fn interpolate_segment(
     let sf = start.frame;
     let ef = end.frame;
     let zoom_constant = height as f64 / 2.0;
-    let r2d = 180.0 / std::f64::consts::PI;
 
     if ef <= sf + 1 {
         let mut v = vec![raw_to_ae(start, width, height)];
@@ -207,12 +221,7 @@ fn interpolate_segment(
     let ev = end.fov_deg;
 
     let mut result = Vec::new();
-    let mut prev_pos:  Option<[f64; 3]> = None;
-    let mut prev_yr:   Option<f64>      = None;
-    let mut prev_xr:   Option<f64>      = None;
-    let mut prev_zr:   Option<f64>      = None;
-    let mut prev_az:   Option<f64>      = None;
-    let mut prev_zoom: Option<f64>      = None;
+    let mut prev: Option<AeCameraValues> = None;
 
     for frame in sf..=ef {
         let t = (frame - sf) as f64 / (ef - sf) as f64;
@@ -224,30 +233,25 @@ fn interpolate_segment(
         let tv = interp.fov.evaluate(t);
 
         let pos = [
-             lerp(sp[0], ep[0], tx) * 20.0 + width  as f64 / 2.0,
-            -lerp(sp[1], ep[1], ty) * 20.0 + height as f64 / 2.0,
-             lerp(sp[2], ep[2], tz) * 20.0,
+             lerp(sp[0], ep[0], tx) * MMD_TO_AE_SCALE + width  as f64 / 2.0,
+            -lerp(sp[1], ep[1], ty) * MMD_TO_AE_SCALE + height as f64 / 2.0,
+             lerp(sp[2], ep[2], tz) * MMD_TO_AE_SCALE,
         ];
-        let yr = -lerp(sr[1], er[1], tr) * r2d;
-        let xr =  lerp(sr[0], er[0], tr) * r2d;
-        let zr =  lerp(sr[2], er[2], tr) * r2d;
-        let az = -lerp(sd, ed, td) * 20.0;
+        let yr = -lerp(sr[1], er[1], tr) * RAD_TO_DEG;
+        let xr =  lerp(sr[0], er[0], tr) * RAD_TO_DEG;
+        let zr =  lerp(sr[2], er[2], tr) * RAD_TO_DEG;
+        let az = -lerp(sd, ed, td) * MMD_TO_AE_SCALE;
         let zm =  fov_to_zoom(lerp(sv, ev, tv), zoom_constant);
 
         let is_kf = frame == sf || frame == ef;
-        let pc  = out_pos  && prev_pos.map_or(true,  |p| !same_6dp(pos[0],p[0]) || !same_6dp(pos[1],p[1]) || !same_6dp(pos[2],p[2]));
-        let yc  = out_rot  && prev_yr.map_or(true,   |p| !same_6dp(yr,  p));
-        let xc  = out_rot  && prev_xr.map_or(true,   |p| !same_6dp(xr,  p));
-        let zc  = out_rot  && prev_zr.map_or(true,   |p| !same_6dp(zr,  p));
-        let ac  = out_dist && prev_az.map_or(true,   |p| !same_6dp(az,  p));
-        let zmc = out_zoom && prev_zoom.map_or(true, |p| !same_6dp(zm,  p));
+        let pc  = out_pos  && prev.as_ref().is_none_or(|p| !same_6dp(pos[0],p.pos[0]) || !same_6dp(pos[1],p.pos[1]) || !same_6dp(pos[2],p.pos[2]));
+        let yc  = out_rot  && prev.as_ref().is_none_or(|p| !same_6dp(yr, p.yr));
+        let xc  = out_rot  && prev.as_ref().is_none_or(|p| !same_6dp(xr, p.xr));
+        let zc  = out_rot  && prev.as_ref().is_none_or(|p| !same_6dp(zr, p.zr));
+        let ac  = out_dist && prev.as_ref().is_none_or(|p| !same_6dp(az, p.az));
+        let zmc = out_zoom && prev.as_ref().is_none_or(|p| !same_6dp(zm, p.zm));
 
-        prev_pos  = Some(pos);
-        prev_yr   = Some(yr);
-        prev_xr   = Some(xr);
-        prev_zr   = Some(zr);
-        prev_az   = Some(az);
-        prev_zoom = Some(zm);
+        prev = Some(AeCameraValues { pos, yr, xr, zr, az, zm });
 
         if !is_kf && !pc && !yc && !xc && !zc && !ac && !zmc { continue; }
 
@@ -359,14 +363,11 @@ fn convert_cameras_with_follow(
     }
 
     let zoom_constant = height as f64 / 2.0;
-    let r2d = 180.0 / std::f64::consts::PI;
 
     // カメラキーフレームのフレーム番号セット
     let cam_kf_set: std::collections::HashSet<i32> = cameras.iter().map(|c| c.frame).collect();
 
-    // 前フレームの値（変化判定用）
-    struct Prev { pos: [f64; 3], yr: f64, az: f64, xr: f64, zr: f64, zm: f64 }
-    let mut prev: Option<Prev> = None;
+    let mut prev: Option<AeCameraValues> = None;
     let mut result: Vec<AeCameraKeyframe> = Vec::new();
 
     for frame_no in first_frame..=last_frame {
@@ -398,14 +399,14 @@ fn convert_cameras_with_follow(
 
         // AE座標変換（追従オフセット加算後）
         let pos = [
-             (cam_pos[0] + follow_offset[0]) * 20.0 + width  as f64 / 2.0,
-            -(cam_pos[1] + follow_offset[1]) * 20.0 + height as f64 / 2.0,
-             (cam_pos[2] + follow_offset[2]) * 20.0,
+             (cam_pos[0] + follow_offset[0]) * MMD_TO_AE_SCALE + width  as f64 / 2.0,
+            -(cam_pos[1] + follow_offset[1]) * MMD_TO_AE_SCALE + height as f64 / 2.0,
+             (cam_pos[2] + follow_offset[2]) * MMD_TO_AE_SCALE,
         ];
-        let yr = -cam_rot[1] * r2d;
-        let xr =  cam_rot[0] * r2d;
-        let zr =  cam_rot[2] * r2d;
-        let az = -cam_dist * 20.0;
+        let yr = -cam_rot[1] * RAD_TO_DEG;
+        let xr =  cam_rot[0] * RAD_TO_DEG;
+        let zr =  cam_rot[2] * RAD_TO_DEG;
+        let az = -cam_dist * MMD_TO_AE_SCALE;
         let zm =  fov_to_zoom(cam_fov, zoom_constant);
 
         let is_kf = cam_kf_set.contains(&frame_no);
@@ -422,7 +423,7 @@ fn convert_cameras_with_follow(
             ),
         };
 
-        prev = Some(Prev { pos, yr, az, xr, zr, zm });
+        prev = Some(AeCameraValues { pos, yr, xr, zr, az, zm });
 
         if !is_kf && !pc && !yc && !xc && !zc && !ac && !zmc { continue; }
 
@@ -466,7 +467,7 @@ fn compute_init_zoom(width: u32, height: u32) -> f64 {
     let half_angle_rad = 22.5_f64.to_radians();
     let aspect = width as f64 / height as f64;
     let tan_w = half_angle_rad.tan() * aspect;
-    let h_fov_deg = tan_w.atan() * 2.0 * (180.0 / std::f64::consts::PI);
+    let h_fov_deg = tan_w.atan() * 2.0 * RAD_TO_DEG;
     (width as f64 / 2.0) / (h_fov_deg / 2.0).to_radians().tan()
 }
 
@@ -479,7 +480,7 @@ fn generate_jsx(keyframes: &[AeCameraKeyframe], config: &CameraJsxConfig) -> Str
         + 1.0 / config.fps as f64;
     let init_zoom = compute_init_zoom(config.width, config.height);
 
-    let mut s = String::new();
+    let mut s = String::with_capacity(1024 + keyframes.len() * 300);
     s.push_str("//=================================================================\n");
     s.push_str("// MikuMikuDance To After Effects (Camera)\n");
     s.push_str("// Reference: (C) 2010 Programmed by 遊太郎\n");
@@ -599,6 +600,7 @@ pub fn output_jsx_from_vmd(
 }
 
 #[cfg(test)]
+#[expect(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

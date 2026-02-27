@@ -1,5 +1,5 @@
-/// 共通バイナリ読み込みユーティリティ
-/// pmm.rs / pmx.rs / vmd.rs で共有する Reader<R> 実装
+//! 共通バイナリ読み込みユーティリティ
+//! pmm.rs / pmx.rs / vmd.rs で共有する Reader<R> 実装
 
 use encoding_rs::SHIFT_JIS;
 use glam::{Quat, Vec3};

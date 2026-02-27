@@ -23,11 +23,7 @@ pub fn run(args: BoneArgs) -> Result<(), i32> {
 
     // --list-models
     if args.list_models {
-        eprintln!("{:<6}  {}", "order", "model name");
-        for (i, &arr_idx) in sorted_order.iter().enumerate() {
-            let m = &pmm_data.models[arr_idx];
-            eprintln!("{:<6}  {} (model_id={}, render_order={})", i, m.name, m.model_id, m.render_order);
-        }
+        print_model_list(&pmm_data.models, &sorted_order);
         return Ok(());
     }
 
@@ -136,9 +132,9 @@ pub fn run(args: BoneArgs) -> Result<(), i32> {
 }
 
 pub(crate) fn print_model_list(models: &[pmm::PmmModel], sorted_order: &[usize]) {
-    eprintln!("Available models (sorted by render_order):");
+    eprintln!("{:<6}  model name", "order");
     for (i, &arr_idx) in sorted_order.iter().enumerate() {
         let m = &models[arr_idx];
-        eprintln!("  [{}] {} (model_id={}, render_order={})", i, m.name, m.model_id, m.render_order);
+        eprintln!("{:<6}  {} (model_id={}, render_order={})", i, m.name, m.model_id, m.render_order);
     }
 }

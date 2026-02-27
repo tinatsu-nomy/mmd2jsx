@@ -1,19 +1,18 @@
 // ボーン位置 JSX 出力モジュール
 // フレームデータを After Effects の null object キーフレームとして JSX スクリプトに出力する。
 
+use glam::Vec3;
 use std::io;
 use std::path::Path;
 
 /// 出力するフレームデータ
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct FrameData {
     /// MMDフレーム番号
     pub frame: i32,
 
     /// ボーンのワールド座標 (MMD座標系: 右手系・Y上・Z前)
-    pub world_x: f32,
-    pub world_y: f32,
-    pub world_z: f32,
+    pub world_pos: Vec3,
 }
 
 /// ボーンJSX出力の設定
@@ -39,7 +38,8 @@ fn generate_jsx(all_frames: &[Vec<FrameData>], config: &JsxConfig) -> String {
     let half_h = config.height as f64 / 2.0;
     let scale = config.scale;
 
-    let mut s = String::new();
+    let kf_count: usize = all_frames.iter().map(|f| f.len()).sum();
+    let mut s = String::with_capacity(512 + config.bone_names.len() * 200 + kf_count * 120);
 
     s.push_str("//=================================================================\n");
     s.push_str("// MikuMikuDance To After Effects (Bone)\n");
@@ -79,9 +79,9 @@ fn generate_jsx(all_frames: &[Vec<FrameData>], config: &JsxConfig) -> String {
     for (bone_idx, (bone_name, frames)) in config.bone_names.iter().zip(all_frames.iter()).enumerate() {
         for (n, fd) in frames.iter().enumerate() {
             let time = fd.frame as f64 / config.fps as f64;
-            let ae_x = fd.world_x as f64 * scale + half_w;
-            let ae_y = -fd.world_y as f64 * scale + half_h;
-            let ae_z = fd.world_z as f64 * scale;
+            let ae_x = fd.world_pos.x as f64 * scale + half_w;
+            let ae_y = -fd.world_pos.y as f64 * scale + half_h;
+            let ae_z = fd.world_pos.z as f64 * scale;
             s.push('\n');
             s.push_str(&format!("//- frame ({}) -\n", bone_name));
             s.push_str(&format!(
@@ -126,7 +126,7 @@ mod tests {
     }
 
     fn single_frame(x: f32, y: f32, z: f32) -> Vec<Vec<FrameData>> {
-        vec![vec![FrameData { frame: 0, world_x: x, world_y: y, world_z: z }]]
+        vec![vec![FrameData { frame: 0, world_pos: Vec3::new(x, y, z) }]]
     }
 
     #[test]
@@ -176,7 +176,7 @@ mod tests {
     fn test_generate_jsx_time_calculation() {
         // frame=30, fps=30 → time = 1.000000
         let config = make_config(1920, 1080, 30, 20.0, vec!["Bone".to_string()], "Comp");
-        let frames = vec![vec![FrameData { frame: 30, world_x: 0.0, world_y: 0.0, world_z: 0.0 }]];
+        let frames = vec![vec![FrameData { frame: 30, world_pos: Vec3::ZERO }]];
         let jsx = generate_jsx(&frames, &config);
         assert!(jsx.contains("1.000000"), "time not found in JSX");
     }
@@ -185,7 +185,7 @@ mod tests {
     fn test_generate_jsx_duration() {
         // max_frame=60, fps=30 → duration = 60/30 + 1/30 = 2.033333...
         let config = make_config(1920, 1080, 30, 20.0, vec!["Bone".to_string()], "Comp");
-        let frames = vec![vec![FrameData { frame: 60, world_x: 0.0, world_y: 0.0, world_z: 0.0 }]];
+        let frames = vec![vec![FrameData { frame: 60, world_pos: Vec3::ZERO }]];
         let jsx = generate_jsx(&frames, &config);
         assert!(jsx.contains("2.033333"), "duration not found in JSX:\n{}", jsx);
     }
@@ -197,8 +197,8 @@ mod tests {
             vec!["Bone0".to_string(), "Bone1".to_string()], "Comp",
         );
         let frames = vec![
-            vec![FrameData { frame: 0, world_x: 0.0, world_y: 0.0, world_z: 0.0 }],
-            vec![FrameData { frame: 0, world_x: 0.0, world_y: 0.0, world_z: 0.0 }],
+            vec![FrameData { frame: 0, world_pos: Vec3::ZERO }],
+            vec![FrameData { frame: 0, world_pos: Vec3::ZERO }],
         ];
         let jsx = generate_jsx(&frames, &config);
         assert!(jsx.contains("layNull[0]"));

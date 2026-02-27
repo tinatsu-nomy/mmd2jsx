@@ -8,7 +8,7 @@ use glam::{EulerRot, Mat4, Quat, Vec3};
 /// 変形順序（仕様書 □変形順序）:
 ///   1. transform_order 昇順
 ///   2. 同値はボーンインデックス順
-///   （物理前/後はフラグ読取未実装のため今回除外）
+///      （物理前/後はフラグ読取未実装のため今回除外）
 ///
 /// 変形パラメータ（仕様書 □変形パラメータ）:
 ///   - ユーザー操作量 (base_rots / base_movs)
@@ -64,25 +64,25 @@ pub fn compute_world_transforms(
         let bone = &pmx_bones[i];
 
         // 付与処理（仕様書 □付与について / □ローカル変形順序）
-        if bone.is_add_rotation || bone.is_add_translation {
-            if let Some(add_src_idx) = bone.add_bone_index {
-                let add_src = add_src_idx as usize;
-                if add_src < n {
-                    apply_grant(
-                        bone,
-                        i,
-                        add_src,
-                        pmx_bones,
-                        &world_mats,
-                        &base_rots,
-                        &base_movs,
-                        &grant_rots,
-                        &grant_movs,
-                        &mut local_rots,
-                        &mut local_movs,
-                        false, // FK フェーズ
-                    );
-                }
+        if (bone.is_add_rotation || bone.is_add_translation)
+            && let Some(add_src_idx) = bone.add_bone_index
+        {
+            let add_src = add_src_idx as usize;
+            if add_src < n {
+                apply_grant(
+                    bone,
+                    i,
+                    add_src,
+                    pmx_bones,
+                    &world_mats,
+                    &base_rots,
+                    &base_movs,
+                    &grant_rots,
+                    &grant_movs,
+                    &mut local_rots,
+                    &mut local_movs,
+                    false, // FK フェーズ
+                );
             }
         }
 
@@ -138,7 +138,8 @@ pub fn compute_world_transforms(
 ///
 /// - FK フェーズ (`is_recompute=false`): 付与元は grant_rots/base_rots を参照
 /// - IK 後の再計算 (`is_recompute=true`): 付与元は local_rots を参照（IK回転量も付与）
-#[allow(clippy::too_many_arguments)]
+// 変形データ（base/grant/local × rot/mov）を全て渡す必要があるため引数が多い
+#[expect(clippy::too_many_arguments)]
 fn apply_grant(
     bone: &pmx::PmxBone,
     i: usize,
@@ -149,8 +150,8 @@ fn apply_grant(
     base_movs: &[Vec3],
     grant_rots: &[Quat],
     grant_movs: &[Vec3],
-    local_rots: &mut Vec<Quat>,
-    local_movs: &mut Vec<Vec3>,
+    local_rots: &mut [Quat],
+    local_movs: &mut [Vec3],
     is_recompute: bool,
 ) {
     let ratio = bone.add_ratio;
@@ -248,18 +249,19 @@ fn calc_world_mat(
 // ─────────────────────────────────────────────
 
 /// CCD-IK ソルバー
+#[expect(clippy::too_many_arguments)]
 fn solve_ccd_ik(
     bones: &[pmx::PmxBone],
-    world_mats: &mut Vec<Mat4>,
-    local_rots: &mut Vec<Quat>,
-    local_movs: &mut Vec<Vec3>,
+    world_mats: &mut [Mat4],
+    local_rots: &mut [Quat],
+    local_movs: &mut [Vec3],
     base_rots: &[Quat],
     base_movs: &[Vec3],
     ik_idx: usize,
     sorted_indices: &[usize],
     extern_parent_mats: &std::collections::HashMap<usize, Mat4>,
 ) {
-    let ik = bones[ik_idx].ik.as_ref().unwrap();
+    let ik = bones[ik_idx].ik.as_ref().expect("ik is Some (caller verified has_ik)");
     let target_raw = ik.target_bone_index;
     if target_raw < 0 || (target_raw as usize) >= bones.len() {
         return;
@@ -334,6 +336,53 @@ fn apply_ik_angle_limit(q: Quat, link: &pmx::IkLink) -> Quat {
 // ─────────────────────────────────────────────
 // IK 後のワールド行列再計算
 // ─────────────────────────────────────────────
+
+#[expect(clippy::too_many_arguments)]
+fn recompute_world_mats_from(
+    bones: &[pmx::PmxBone],
+    world_mats: &mut [Mat4],
+    local_rots: &mut [Quat],
+    local_movs: &mut [Vec3],
+    base_rots: &[Quat],
+    base_movs: &[Vec3],
+    start_bone: usize,
+    sorted_indices: &[usize],
+    extern_parent_mats: &std::collections::HashMap<usize, Mat4>,
+) {
+    let start_order = bones[start_bone].transform_order;
+    let start_pos = sorted_indices
+        .iter()
+        .position(|&i| i == start_bone)
+        .unwrap_or(0);
+    let n = bones.len();
+
+    for (pos, &i) in sorted_indices.iter().enumerate() {
+        if bones[i].transform_order < start_order
+            || (bones[i].transform_order == start_order && pos < start_pos)
+        {
+            continue;
+        }
+
+        let bone = &bones[i];
+
+        if (bone.is_add_rotation || bone.is_add_translation)
+            && let Some(add_src_idx) = bone.add_bone_index
+        {
+            let add_src = add_src_idx as usize;
+            if add_src < n {
+                apply_grant(
+                    bone, i, add_src, bones, world_mats,
+                    base_rots, base_movs,
+                    &[], &[], // grant_rots/movs（is_recompute=true のため不参照）
+                    local_rots, local_movs,
+                    true,
+                );
+            }
+        }
+
+        world_mats[i] = calc_world_mat(bones, world_mats, local_rots, local_movs, i, n, extern_parent_mats);
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -588,51 +637,5 @@ mod tests {
             (ik_pos - goal).length() < (fk_pos - goal).length(),
             "IK pos={:?} should be closer to goal than FK pos={:?}", ik_pos, fk_pos
         );
-    }
-}
-
-fn recompute_world_mats_from(
-    bones: &[pmx::PmxBone],
-    world_mats: &mut Vec<Mat4>,
-    local_rots: &mut Vec<Quat>,
-    local_movs: &mut Vec<Vec3>,
-    base_rots: &[Quat],
-    base_movs: &[Vec3],
-    start_bone: usize,
-    sorted_indices: &[usize],
-    extern_parent_mats: &std::collections::HashMap<usize, Mat4>,
-) {
-    let start_order = bones[start_bone].transform_order;
-    let start_pos = sorted_indices
-        .iter()
-        .position(|&i| i == start_bone)
-        .unwrap_or(0);
-    let n = bones.len();
-
-    for (pos, &i) in sorted_indices.iter().enumerate() {
-        if bones[i].transform_order < start_order
-            || (bones[i].transform_order == start_order && pos < start_pos)
-        {
-            continue;
-        }
-
-        let bone = &bones[i];
-
-        if bone.is_add_rotation || bone.is_add_translation {
-            if let Some(add_src_idx) = bone.add_bone_index {
-                let add_src = add_src_idx as usize;
-                if add_src < n {
-                    apply_grant(
-                        bone, i, add_src, bones, world_mats,
-                        base_rots, base_movs,
-                        &[], &[], // grant_rots/movs（is_recompute=true のため不参照）
-                        local_rots, local_movs,
-                        true,
-                    );
-                }
-            }
-        }
-
-        world_mats[i] = calc_world_mat(bones, world_mats, local_rots, local_movs, i, n, extern_parent_mats);
     }
 }

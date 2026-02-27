@@ -14,7 +14,7 @@ use std::fs::File;
 
 /// ボーンキーフレームの補間曲線（4点のbyte値）
 /// [x1, y1, x2, y2] で始点側(x1,y1)と終点側(x2,y2)の制御点を表す
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct InterpolationCurve {
     pub x1: u8,
     pub y1: u8,
@@ -56,7 +56,7 @@ pub struct PmmBone {
 }
 
 /// 外部親エントリ（コンフィグフレームごと）
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ExternParentEntry {
     /// 参照先モデルのインデックス（PMMシーン内、-1=なし）
     pub model_index: i32,
@@ -183,7 +183,7 @@ fn read_model<R: Read>(r: &mut Reader<R>) -> io::Result<PmmModel> {
     let model_id = r.read_u8()?;
     let name = r.read_dotnet_string()?;
     let _name_en = r.read_dotnet_string()?;
-    let _path = r.read_string_sjis_fixed(256)?;  // Shift JIS固定長256バイト
+    let path = r.read_string_sjis_fixed(256)?;  // Shift JIS固定長256バイト
     let _keyframe_editor_rows = r.read_u8()?;
 
     // ボーン名リスト
@@ -228,16 +228,13 @@ fn read_model<R: Read>(r: &mut Reader<R>) -> io::Result<PmmModel> {
     // 初期ボーンフレームの読み込み（各ボーン1つずつ）
     let mut init_next_ids: Vec<Option<i32>> = Vec::with_capacity(bone_count);
     let mut bones: Vec<PmmBone> = bone_names
-        .iter()
-        .map(|name| PmmBone {
-            name: name.clone(),
-            frames: Vec::new(),
-        })
+        .into_iter()
+        .map(|name| PmmBone { name, frames: Vec::new() })
         .collect();
 
-    for i in 0..bone_count {
+    for bone in bones.iter_mut().take(bone_count) {
         let (frame, _prev_id, next_id) = read_bone_frame_initial(r)?;
-        bones[i].frames.push(frame);
+        bone.frames.push(frame);
         init_next_ids.push(if next_id == 0 { None } else { Some(next_id) });
     }
 
@@ -276,18 +273,14 @@ fn read_model<R: Read>(r: &mut Reader<R>) -> io::Result<PmmModel> {
     }
 
     // モーフフレームの読み込み（スキップ）
-    let morph_init_next_ids: Vec<Option<i32>> = (0..morph_count)
-        .map(|_| {
-            let (_frame, _prev, next) = read_morph_frame_initial(r)?;
-            Ok(if next == 0 { None } else { Some(next) })
-        })
-        .collect::<io::Result<_>>()?;
+    for _ in 0..morph_count {
+        read_morph_frame_initial(r)?;
+    }
 
     let morph_frame_count = r.read_i32()? as usize;
     // 各モーフフレーム: i32 (index) + i32 (frame) + i32 (prev) + i32 (next) + f32 (weight) + bool (selected)
     // = 4+4+4+4+4+1 = 21 bytes
     let _ = r.read_bytes(morph_frame_count * 21)?;
-    let _ = morph_init_next_ids; // suppress warning
 
     // 初期コンフィグフレーム
     let initial_cf = read_config_frame(r, ik_count, parentable_count, true)?;
@@ -322,7 +315,7 @@ fn read_model<R: Read>(r: &mut Reader<R>) -> io::Result<PmmModel> {
         name,
         model_id,
         render_order,
-        path: _path,
+        path,
         bones,
         ik_bone_indices,
         initial_ik_state,

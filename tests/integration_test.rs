@@ -106,7 +106,7 @@ fn test_build_frames_no_pmx_two_keyframes() {
     assert_eq!(result.len(), 2, "expected 2 keyframes");
     assert_eq!(result[0].frame, 0);
     assert_eq!(result[1].frame, 10);
-    assert!((result[1].world_x - 10.0).abs() < 1e-5);
+    assert!((result[1].world_pos.x - 10.0).abs() < 1e-5);
 }
 
 #[test]
@@ -121,7 +121,7 @@ fn test_build_frames_all_frames_mode() {
     assert_eq!(result[0].frame, 0);
     assert_eq!(result[10].frame, 10);
     // 中間値の確認: frame 5 → x ≈ 5.0
-    assert!((result[5].world_x - 5.0).abs() < 0.1, "frame5 x={}", result[5].world_x);
+    assert!((result[5].world_pos.x - 5.0).abs() < 0.1, "frame5 x={}", result[5].world_pos.x);
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn test_output_jsx_coordinate_content() {
     // frame=0, world_x=1, world_y=2, world_z=3, scale=20, 1920x1080
     // AE X=980, AE Y=500, AE Z=60
     let all_frames = vec![vec![FrameData {
-        frame: 0, world_x: 1.0, world_y: 2.0, world_z: 3.0,
+        frame: 0, world_pos: glam::Vec3::new(1.0, 2.0, 3.0),
     }]];
     let config = JsxConfig {
         width: 1920, height: 1080, aspect: 1.0,
@@ -233,8 +233,8 @@ fn test_build_frames_with_pmx_fk() {
     // child ボーン（PMX index=1）の world 座標を build_frames 経由で取得
     let result = build_frames(&pmm_data, 0, &[Some(pmx_bones)], 1, 30, false);
     assert_eq!(result.len(), 1);
-    assert!((result[0].world_y - 15.0).abs() < 1e-4,
-        "expected world_y=15.0, got {}", result[0].world_y);
+    assert!((result[0].world_pos.y - 15.0).abs() < 1e-4,
+        "expected world_y=15.0, got {}", result[0].world_pos.y);
 }
 
 // ────── output_jsx_from_vmd 公開 API ──────

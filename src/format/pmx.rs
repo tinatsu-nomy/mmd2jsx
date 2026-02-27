@@ -231,6 +231,7 @@ fn skip_materials<R: Read>(r: &mut Reader<R>, s: &PmxSettings, enc: u8) -> io::R
 // ─────────────────────────────────────────────
 
 #[cfg(test)]
+#[expect(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::format::reader::Reader;
