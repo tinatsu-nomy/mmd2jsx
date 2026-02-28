@@ -29,6 +29,10 @@ Inwerwm 様作成の MikuMikuMethods を参考にしました。
 
 ## インストール
 
+### ダウンロード（プリビルドバイナリ）
+
+[GitHub Releases](https://github.com/tinatsu-nomy/mmd2jsx/releases) から Windows 用バイナリ（`mmd2jsx.exe`）をダウンロードできます。
+
 ### ソースからビルド
 
 ```bash

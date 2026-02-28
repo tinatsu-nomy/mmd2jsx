@@ -5,6 +5,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.1.4] - 2026-02-28
+
+### Changed
+
+- 生成 JSX のコメント行の権利者表示を変更:
+  `// Reference: (C) 2010 Programmed by 遊太郎`
+  → `// Reference: MikuMikuDance To After Effects 1.3 (C) 2010 Programmed by 遊太郎`
+  （bone・camera 両サブコマンドの出力に適用）
+- `README.md` にプリビルドバイナリのダウンロードリンク（GitHub Releases）を追加
+
+---
+
 ## [0.1.3] - 2026-02-28
 
 ### Changed (品質改善・リファクタリング)

@@ -483,7 +483,7 @@ fn generate_jsx(keyframes: &[AeCameraKeyframe], config: &CameraJsxConfig) -> Str
     let mut s = String::with_capacity(1024 + keyframes.len() * 300);
     s.push_str("//=================================================================\n");
     s.push_str("// MikuMikuDance To After Effects (Camera)\n");
-    s.push_str("// Reference: (C) 2010 Programmed by 遊太郎\n");
+    s.push_str("// Reference: MikuMikuDance To After Effects 1.3 (C) 2010 Programmed by 遊太郎\n");
     s.push_str("//=================================================================\n\n");
     s.push_str("//- Composition Settings ------------------------------------------\n");
     s.push_str(&format!("var Width       = {};\n", config.width));

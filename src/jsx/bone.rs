@@ -43,7 +43,7 @@ fn generate_jsx(all_frames: &[Vec<FrameData>], config: &JsxConfig) -> String {
 
     s.push_str("//=================================================================\n");
     s.push_str("// MikuMikuDance To After Effects (Bone)\n");
-    s.push_str("// Reference: (C) 2010 Programmed by 遊太郎\n");
+    s.push_str("// Reference: MikuMikuDance To After Effects 1.3 (C) 2010 Programmed by 遊太郎\n");
     s.push_str("//=================================================================\n");
     s.push('\n');
     s.push_str("//- Composition Settings ------------------------------------------\n");
