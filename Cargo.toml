@@ -2,6 +2,7 @@
 name = "mmd2jsx"
 version = "0.1.4"
 edition = "2024"
+license = "0BSD AND MIT"
 
 [lib]
 name = "mmd2jsx"
